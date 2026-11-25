@@ -46,7 +46,11 @@ def _fill_after_label(
     if not value:
         return False
 
-    cond = "not(@type='hidden') and not(@type='checkbox') and not(@type='radio') and not(@disabled) and not(@readonly)" if tag == "input" else "not(@disabled)"
+    cond = (
+        "not(@type='hidden') and not(@type='checkbox') and not(@type='radio') and not(@disabled) and not(@readonly)"
+        if tag == "input"
+        else "not(@disabled)"
+    )
     xpaths = []
     if section_title:
         for pref in _section_prefix(section_title):
@@ -69,10 +73,9 @@ def _fill_after_label(
 
 
 def _fill_cargo_description(page: Page, description: str, log: Callable[[str], None]) -> bool:
-    """Железобетонно заполняет '* Описание груза' (и input, и textarea) и проверяет ввод."""
+    """Железобетонно заполняет '* Описание груза' (и input, и textarea)."""
     desc = (description or "ПЛАТЫ").strip()
 
-    # Способ 1: Находим поле (input или textarea) напрямую в DOM рядом с текстом 'Описание груза'
     try:
         found = page.evaluate(
             """() => {
@@ -110,7 +113,6 @@ def _fill_cargo_description(page: Page, description: str, log: Callable[[str], N
     except Exception:
         pass
 
-    # Способ 2: Переход по Tab из поля «Высота» (пропускаем кнопку очистки ×, пока не попадём в пустое поле)
     try:
         for _ in range(5):
             page.keyboard.press("Tab")
@@ -135,13 +137,300 @@ def _fill_cargo_description(page: Page, description: str, log: Callable[[str], N
     except Exception:
         pass
 
-    # Способ 3: XPath для input и textarea
     for tag in ("input", "textarea"):
         if _fill_after_label(page, "Описание", desc, section_title="Товары", tag=tag, press_tab=True):
             log(f"-> Описание груза вписано ({tag}): {desc}")
             return True
 
     log("[ВНИМАНИЕ] Не удалось найти поле «Описание груза»!")
+    return False
+
+
+def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> bool:
+    """Заполняет 'Дополнительный сбор за объявленную стоимость' (подпись 'объявленная стоимость' находится ПОД полем)."""
+    val = str(value or "").strip()
+    if not val:
+        return False
+
+    # 1. Ищем блок с текстом 'Дополнительный сбор за объявленную стоимость' и поле внутри него
+    try:
+        focused = page.evaluate(
+            """() => {
+                const all = Array.from(document.querySelectorAll('*'));
+                const titleEl = all.find(el => {
+                    if (el.children.length > 2) return false;
+                    const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    return t.includes('дополнительный сбор за объявленную стоимость');
+                });
+                if (!titleEl) return false;
+
+                let box = titleEl.parentElement;
+                for (let i = 0; i < 6 && box; i++) {
+                    const inp = box.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
+                    if (inp && inp.offsetParent !== null) {
+                        if (inp.disabled) {
+                            const cb = box.querySelector('input[type="checkbox"], [role="checkbox"]');
+                            if (cb) cb.click();
+                        }
+                        inp.scrollIntoView({block: 'center'});
+                        inp.focus();
+                        inp.click();
+                        return true;
+                    }
+                    box = box.parentElement;
+                }
+                return false;
+            }"""
+        )
+        if focused:
+            page.wait_for_timeout(250)
+            page.keyboard.press("ControlOrMeta+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(val, delay=35)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(400)
+            log(f"-> Объявленная стоимость вписана: {val}")
+            return True
+    except Exception:
+        pass
+
+    # 2. Резерв: поле ввода прямо ПЕРЕД подписью 'объявленная стоимость'
+    try:
+        xp = "xpath=//*[contains(normalize-space(.), 'объявленная стоимость') and not(descendant::input)][1]/preceding::input[not(@type='hidden') and not(@type='checkbox') and not(@disabled)][1]"
+        if _fill_locator(page.locator(xp).first, val, press_tab=True):
+            log(f"-> Объявленная стоимость вписана (XPath): {val}")
+            return True
+    except Exception:
+        pass
+
+    log("[ВНИМАНИЕ] Не удалось вписать объявленную стоимость!")
+    return False
+
+
+def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[[str], None]) -> None:
+    """Выбирает время забора 'с' (например 12:00) и 'до' (например 15:00) в выпадающих полях СДЭК."""
+    if not time_from and not time_to:
+        return
+
+    def _pick_time_field(field_index: int, target_time: str) -> bool:
+        if not target_time:
+            return False
+        # Поля времени идут сразу после поля даты (index 0 = дата, index 1 = время с, index 2 = время до)
+        xp = (
+            "xpath=//*[contains(normalize-space(.), 'Дата и время забора') and not(descendant::input)][1]"
+            f"/following::input[not(@type='hidden') and not(@type='checkbox') and not(@disabled)][{field_index}]"
+        )
+        loc = page.locator(xp).first
+        try:
+            loc.scroll_into_view_if_needed(timeout=2000)
+            if not loc.is_visible(timeout=1500):
+                return False
+            loc.click()
+            page.wait_for_timeout(600)
+
+            # Пробуем кликнуть по нужному времени в открывшемся выпадающем списке
+            opt = page.get_by_text(target_time, exact=True).last
+            if opt.is_visible(timeout=1500):
+                opt.click(force=True, timeout=2000)
+                page.wait_for_timeout(500)
+                return True
+
+            # Если поле позволяет ввод с клавиатуры — вводим напрямую
+            loc.press("ControlOrMeta+A")
+            loc.press("Backspace")
+            loc.type(target_time, delay=40)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(400)
+            return True
+        except Exception:
+            return False
+
+    ok1 = _pick_time_field(2, time_from)
+    ok2 = _pick_time_field(3, time_to)
+    if ok1 or ok2:
+        log(f"-> Время забора установлено: {time_from} - {time_to}")
+    else:
+        log(f"[ВНИМАНИЕ] Не удалось изменить время забора на {time_from} - {time_to}")
+
+
+def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callable[[str], None]) -> bool:
+    """Нажимает 'ИЗМЕНИТЬ' в блоке 'Доставить в ПВЗ или постамат', ищет нужный пункт и выбирает его."""
+    code = (pvz_code or "").strip()
+    addr = (pvz_address or "").strip()
+    if not code and not addr:
+        return False
+
+    # Для поиска по адресу убираем 'ул.' / 'улица', чтобы СДЭК точно нашёл пункт
+    short_addr = re.sub(r"^(ул\.?|улица|пр-т\.?|проспект|б-р\.?|бульвар|ш\.?|шоссе)\s*", "", addr, flags=re.IGNORECASE).strip()
+    query = code if code else short_addr
+
+    log(f"11. Выбираю ПВЗ/постамат: {query}...")
+
+    # 1. Нажимаем кнопку «ИЗМЕНИТЬ» рядом с «Доставить в ПВЗ или постамат»
+    clicked_change = False
+    for sel in (
+        "xpath=//*[contains(normalize-space(.), 'Доставить в ПВЗ')][last()]/following::*[normalize-space(.)='ИЗМЕНИТЬ' or normalize-space(.)='Изменить'][1]",
+        "button:has-text('ИЗМЕНИТЬ')",
+        "text=ИЗМЕНИТЬ",
+    ):
+        try:
+            btn = page.locator(sel).first
+            btn.scroll_into_view_if_needed(timeout=2000)
+            if btn.is_visible(timeout=2000):
+                btn.click(force=True, timeout=3000)
+                clicked_change = True
+                break
+        except Exception:
+            continue
+
+    if not clicked_change:
+        log("[ВНИМАНИЕ] Кнопка «ИЗМЕНИТЬ» для ПВЗ не найдена.")
+        return False
+
+    page.wait_for_timeout(1500)
+
+    # 2. Ищем поле поиска внутри открывшегося окна выбора ПВЗ
+    search_selectors = [
+        "input[placeholder*='Поиск по ПВЗ' i]",
+        "input[placeholder*='постамат' i]",
+        "input[placeholder*='Поиск' i]",
+        "input[placeholder*='адрес' i]",
+        "input[placeholder*='улиц' i]",
+        "[role='dialog'] input[type='text']",
+        ".modal input[type='text']",
+    ]
+    filled_search = False
+    for sel in search_selectors:
+        try:
+            inp = page.locator(sel).last
+            if inp.is_visible(timeout=1500):
+                inp.click()
+                inp.press("ControlOrMeta+A")
+                inp.press("Backspace")
+                inp.type(query, delay=40)
+                filled_search = True
+                break
+        except Exception:
+            continue
+
+    if not filled_search:
+        log("[ВНИМАНИЕ] Поле поиска ПВЗ в окне СДЭК не найдено.")
+        return False
+
+    page.wait_for_timeout(1800)
+
+    # 3. Кликаем по найденному пункту (по коду, по короткому адресу или по первому слову улицы + дому)
+    candidates = [c for c in (code, addr, short_addr) if c]
+    if short_addr:
+        # Например, из 'Гагарина, 76' берём 'Гагарина'
+        first_word = short_addr.split(",")[0].strip()
+        if first_word and first_word not in candidates:
+            candidates.append(first_word)
+
+    picked_item = False
+    for cand in candidates:
+        try:
+            loc = page.get_by_text(cand, exact=False).last
+            if loc.is_visible(timeout=2000):
+                loc.click(force=True, timeout=2500)
+                picked_item = True
+                break
+        except Exception:
+            continue
+
+    page.wait_for_timeout(1000)
+
+    # 4. Нажимаем кнопку «Выбрать» / «ВЫБРАТЬ»
+    for btn_text in ("ВЫБРАТЬ", "Выбрать", "Выбрать пункт"):
+        try:
+            btn = page.get_by_role("button", name=btn_text, exact=False).last
+            if btn.is_visible(timeout=1500):
+                btn.click(force=True, timeout=2500)
+                page.wait_for_timeout(800)
+                log(f"-> ПВЗ выбран: {query}")
+                return True
+        except Exception:
+            pass
+        try:
+            loc = page.get_by_text(btn_text, exact=True).last
+            if loc.is_visible(timeout=1000):
+                loc.click(force=True, timeout=2500)
+                page.wait_for_timeout(800)
+                log(f"-> ПВЗ выбран: {query}")
+                return True
+        except Exception:
+            pass
+
+    if picked_item:
+        log(f"-> ПВЗ кликнут: {query}")
+        return True
+
+    log(f"[ВНИМАНИЕ] Не удалось выбрать ПВЗ «{query}».")
+    return False
+
+
+def _fill_order_comment(page: Page, comment: str, log: Callable[[str], None]) -> bool:
+    """Надёжно заполняет textarea в блоке 'Комментарий к заказу' (например, 'УПД')."""
+    text = (comment or "").strip()
+    if not text:
+        return False
+
+    # 1. Через DOM — находим textarea сразу после заголовка 'Комментарий к заказу'
+    try:
+        focused = page.evaluate(
+            """() => {
+                const all = Array.from(document.querySelectorAll('h1, h2, h3, h4, div, label, span'));
+                const titleEl = all.find(el => {
+                    if (el.children.length > 1) return false;
+                    const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    return t === 'комментарий к заказу';
+                });
+                if (titleEl) {
+                    let box = titleEl.parentElement;
+                    for (let i = 0; i < 4 && box; i++) {
+                        const ta = box.querySelector('textarea:not([disabled])');
+                        if (ta && ta.offsetParent !== null) {
+                            ta.scrollIntoView({block: 'center'});
+                            ta.focus();
+                            ta.click();
+                            return true;
+                        }
+                        box = box.parentElement;
+                    }
+                }
+                const tas = Array.from(document.querySelectorAll('textarea:not([disabled])')).filter(el => el.offsetParent !== null);
+                if (tas.length > 0) {
+                    const lastTa = tas[tas.length - 1];
+                    lastTa.scrollIntoView({block: 'center'});
+                    lastTa.focus();
+                    lastTa.click();
+                    return true;
+                }
+                return false;
+            }"""
+        )
+        if focused:
+            page.wait_for_timeout(200)
+            page.keyboard.press("ControlOrMeta+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(text, delay=35)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(400)
+            log(f"-> Комментарий к заказу вписан: {text}")
+            return True
+    except Exception:
+        pass
+
+    # 2. Резерв: последний видимый textarea на странице
+    try:
+        ta = page.locator("textarea").last
+        if _fill_locator(ta, text, press_tab=True):
+            log(f"-> Комментарий к заказу вписан (textarea): {text}")
+            return True
+    except Exception:
+        pass
+
+    log("[ВНИМАНИЕ] Не удалось вписать комментарий к заказу!")
     return False
 
 
@@ -498,19 +787,12 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             _safe_click_text(page, order.get("tariff", "Экспресс дверь-склад"), timeout=5000)
             page.wait_for_timeout(1200)
 
-            # --- ШАГ 8: ДОПОЛНИТЕЛЬНЫЕ УСЛУГИ ---
+            # --- ШАГ 8: ДОПОЛНИТЕЛЬНЫЕ УСЛУГИ (ОБЪЯВЛЕННАЯ СТОИМОСТЬ 3000) ---
             if order.get("use_insurance") and order.get("declared_value"):
-                log("9. Указываю объявленную стоимость...")
-                _click_in_section(page, "Дополнительные услуги", "Дополнительный сбор за объявленную стоимость")
-                page.wait_for_timeout(500)
-                _fill_after_label(
-                    page,
-                    "объявленная стоимость",
-                    order["declared_value"],
-                    section_title="Дополнительные услуги",
-                )
+                log(f"9. Указываю объявленную стоимость ({order['declared_value']})...")
+                _fill_declared_value(page, order["declared_value"], log)
 
-            # --- ШАГ 9: ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ (ЗАБОР КУРЬЕРОМ) ---
+            # --- ШАГ 9: ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ (ЗАБОР КУРЬЕРОМ: АДРЕС, ДАТА, ВРЕМЯ) ---
             log("10. Заполняю адрес, дату и время забора...")
             _fill_after_label(
                 page,
@@ -532,10 +814,8 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 section_title="Информация об отправлении",
                 press_tab=True,
             )
-            if order.get("time_from"):
-                _click_in_section(page, "Информация об отправлении", order["time_from"], timeout=1500)
-            if order.get("time_to"):
-                _click_in_section(page, "Информация об отправлении", order["time_to"], timeout=1500)
+            page.wait_for_timeout(500)
+            _select_pickup_time(page, order.get("time_from", ""), order.get("time_to", ""), log)
 
             if order.get("need_attorney"):
                 _click_in_section(page, "Информация об отправлении", "Курьеру необходима доверенность", timeout=1500)
@@ -552,31 +832,15 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             pvz_query = (order.get("pvz_code") or order.get("pvz_address") or "").strip()
 
             if delivery_to in ("В ПВЗ", "В ПОСТАМАТ") and pvz_query:
-                log(f"11. Выбираю ПВЗ/постамат: {pvz_query}...")
-                _click_in_section(page, "Информация об отправлении", "ИЗМЕНИТЬ", timeout=1500)
-                page.wait_for_timeout(800)
-
-                pvz_inp = page.locator("input[placeholder*='Поиск по ПВЗ' i], input[placeholder*='постамат' i]").first
-                if _fill_locator(pvz_inp, pvz_query):
-                    page.wait_for_timeout(1500)
-                    if not _safe_click_text(page, pvz_query, timeout=3000):
-                        if order.get("pvz_address"):
-                            _safe_click_text(page, order["pvz_address"], timeout=3000)
-                    page.wait_for_timeout(800)
-                    _safe_click_text(page, "Выбрать", timeout=2000)
+                _select_pvz_on_cdek(page, order.get("pvz_code", ""), order.get("pvz_address", ""), log)
             elif delivery_to == "КУРЬЕРОМ ПО АДРЕСУ" and order.get("pvz_address"):
                 log(f"11. Заполняю адрес доставки курьером: {order['pvz_address']}...")
                 _fill_after_label(page, "Улица", order["pvz_address"], section_title="Информация об отправлении")
 
-            # --- ШАГ 11: КОММЕНТАРИЙ К ЗАКАЗУ ---
+            # --- ШАГ 11: КОММЕНТАРИЙ К ЗАКАЗУ (УПД) ---
             log("12. Заполняю комментарий к заказу...")
             if order.get("order_comment"):
-                _fill_after_label(
-                    page,
-                    "Комментарий к заказу",
-                    order["order_comment"],
-                    tag="textarea",
-                )
+                _fill_order_comment(page, order["order_comment"], log)
 
             # --- ШАГ 12: СОЗДАНИЕ ЗАКАЗА ---
             log("13. Нажимаю «СОЗДАТЬ ЗАКАЗ»...")
