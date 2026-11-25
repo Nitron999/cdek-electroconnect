@@ -16,7 +16,10 @@ def _resolve_pickup_slot(
     time_to: str,
     log: Callable[[str], None],
 ) -> tuple[str, str, str]:
-    """Если забор сегодня и время начала уже прошло — сдвигает вверх с шагом 30 мин (+3 ч интервал)."""
+    """
+    Если забор сегодня и текущее время уже дошло до начала слота или прошло его —
+    сдвигает старт вверх с шагом 30 минут и сохраняет длительность (минимум 3 часа).
+    """
     now = datetime.datetime.now()
     today = now.date()
 
@@ -28,9 +31,11 @@ def _resolve_pickup_slot(
     def _to_min(val: str, default_m: int) -> int:
         try:
             h, m = map(int, (val or "").strip().split(":"))
-            return h * 60 + m
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h * 60 + m
         except Exception:
-            return default_m
+            pass
+        return default_m
 
     def _fmt(m: int) -> str:
         return f"{m // 60:02d}:{m % 60:02d}"
@@ -39,7 +44,8 @@ def _resolve_pickup_slot(
     end_m = _to_min(time_to, 15 * 60)
     duration = max(180, end_m - start_m)
 
-    if target_date == today:
+    if target_date <= today:
+        target_date = today
         now_m = now.hour * 60 + now.minute
         if now_m >= start_m:
             next_start = ((now_m // 30) + 1) * 30
@@ -326,10 +332,9 @@ def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> 
 
 def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[[str], None]) -> None:
     """
-    Надёжно выставляет время забора 'с' и 'до' в полях СДЭК (с иконкой часов и маской):
-    1) Ждёт перерисовку после ввода даты;
-    2) Пробует прямой ввод с клавиатуры (12:00 и 1200);
-    3) Если поле readonly/дропдаун — кликает по иконке часов справа и выбирает нужное время в списке.
+    Выставляет время забора 'с' и 'до' в блоке 'Дата и время забора курьером посылки':
+    находит два слота времени (левый = с, правый = до), кликает по ним / иконке часов,
+    выбирает значение из открывшегося списка или вводит с клавиатуры и проверяет результат.
     """
     if not time_from and not time_to:
         return
@@ -338,9 +343,9 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
         page.keyboard.press("Escape")
     except Exception:
         pass
-    page.wait_for_timeout(1200)
+    page.wait_for_timeout(1000)
 
-    def _get_time_boxes() -> list[dict]:
+    def _read_time_slots() -> list[dict]:
         try:
             return page.evaluate(
                 """() => {
@@ -353,95 +358,90 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
                     if (!labelEl) return [];
 
                     labelEl.scrollIntoView({block: 'center'});
-                    let box = labelEl.parentElement;
-                    for (let i = 0; i < 6 && box; i++) {
-                        const raw = [];
-                        for (const el of box.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])')) {
-                            if (el.offsetParent === null || el.disabled) continue;
-                            const v = (el.value || '').trim();
-                            if (/^\\d{2}:\\d{2}$/.test(v)) {
-                                const r = el.getBoundingClientRect();
-                                if (r.width > 20 && r.height > 15) {
-                                    raw.push({
-                                        text: v,
-                                        x: r.left + r.width / 2,
-                                        y: r.top + r.height / 2,
-                                        iconX: r.right - 14,
-                                        left: r.left,
-                                        top: r.top,
-                                    });
-                                }
+                    const labelTop = labelEl.getBoundingClientRect().top;
+
+                    // Ищем все видимые элементы со временем ЧЧ:ММ или --:-- ниже строки подписи 'Дата и время забора'
+                    // и выше 'Перерыв' / 'Минимальный временной интервал'
+                    let limitBottom = labelTop + 260;
+                    for (const el of all) {
+                        if (el.offsetParent === null || el.children.length > 2) continue;
+                        const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        if (t === 'перерыв' || t.startsWith('минимальный временной интервал')) {
+                            const r = el.getBoundingClientRect();
+                            if (r.top > labelTop && r.top < limitBottom) {
+                                limitBottom = r.top;
                             }
                         }
-                        if (raw.length < 2) {
-                            for (const el of box.querySelectorAll('button, div, span')) {
-                                if (el.offsetParent === null) continue;
-                                const txt = (el.innerText || el.textContent || '').trim();
-                                if (!/^\\d{2}:\\d{2}$/.test(txt)) continue;
-                                const hasChildMatch = Array.from(el.children).some(
-                                    c => /^\\d{2}:\\d{2}$/.test((c.innerText || c.textContent || '').trim())
-                                );
-                                if (hasChildMatch) continue;
-                                const r = el.getBoundingClientRect();
-                                if (r.width > 10 && r.height > 10) {
-                                    raw.push({
-                                        text: txt,
-                                        x: r.left + r.width / 2,
-                                        y: r.top + r.height / 2,
-                                        iconX: r.right + 18,
-                                        left: r.left,
-                                        top: r.top,
-                                    });
-                                }
-                            }
-                        }
-                        raw.sort((a, b) => (Math.abs(a.top - b.top) > 25 ? a.top - b.top : a.left - b.left));
-                        const unique = [];
-                        for (const item of raw) {
-                            if (!unique.some(u => Math.abs(u.x - item.x) < 40 && Math.abs(u.y - item.y) < 25)) {
-                                unique.push(item);
-                            }
-                        }
-                        if (unique.length >= 2) {
-                            return unique.slice(0, 2);
-                        }
-                        box = box.parentElement;
                     }
-                    return [];
+
+                    const candidates = [];
+                    for (const el of all) {
+                        if (el.offsetParent === null) continue;
+                        const r = el.getBoundingClientRect();
+                        if (r.top < labelTop - 10 || r.top > limitBottom) continue;
+                        if (r.width < 12 || r.height < 12) continue;
+
+                        let val = '';
+                        if (el.tagName === 'INPUT') {
+                            val = (el.value || '').trim();
+                        } else if (el.children.length === 0) {
+                            val = (el.innerText || el.textContent || '').trim();
+                        }
+                        if (/^(\\d{2}:\\d{2}|--:--)$/.test(val)) {
+                            candidates.push({
+                                tag: el.tagName,
+                                val: val,
+                                x: r.left + r.width / 2,
+                                y: r.top + r.height / 2,
+                                left: r.left,
+                                top: r.top,
+                                right: r.right,
+                            });
+                        }
+                    }
+
+                    // Сортируем слева направо и оставляем первые два уникальных слота (левее 'Перерыв')
+                    candidates.sort((a, b) => a.left - b.left);
+                    const slots = [];
+                    for (const c of candidates) {
+                        if (!slots.some(s => Math.abs(s.left - c.left) < 45 && Math.abs(s.top - c.top) < 25)) {
+                            slots.push(c);
+                        }
+                    }
+                    return slots.slice(0, 2);
                 }"""
             ) or []
         except Exception:
             return []
 
-    def _is_slot_set(slot_idx: int, target_time: str) -> bool:
-        after = _get_time_boxes()
-        return len(after) > slot_idx and after[slot_idx]["text"] == target_time
+    def _slot_value(idx: int) -> str:
+        slots = _read_time_slots()
+        return slots[idx]["val"] if len(slots) > idx else ""
 
-    def _click_popup_time(target_time: str, trig_x: float, trig_y: float) -> bool:
-        # 1. Ищем точный пункт '12:00' в открывшемся списке
+    def _click_dropdown_item(target_time: str, trig_x: float, trig_y: float) -> bool:
+        # 1. Ищем видимый элемент с точным текстом target_time (например '12:00' или '15:00')
         coords = page.evaluate(
             """({target, trigX, trigY}) => {
-                const els = Array.from(document.querySelectorAll('li, [role="option"], [class*="option" i], [class*="item" i], [class*="time" i] div, [class*="time" i] span, div, span, button'));
-                const matches = [];
+                const els = Array.from(document.querySelectorAll('li, [role="option"], button, div, span'));
+                const hits = [];
                 for (const el of els) {
                     if (el.offsetParent === null || el.tagName === 'INPUT') continue;
                     const txt = (el.innerText || el.textContent || '').trim();
                     if (txt !== target) continue;
-                    const hasChildMatch = Array.from(el.children).some(
-                        c => (c.innerText || c.textContent || '').trim() === target
-                    );
-                    if (hasChildMatch) continue;
+                    const hasChild = Array.from(el.children).some(c => (c.innerText || c.textContent || '').trim() === target);
+                    if (hasChild) continue;
                     const r = el.getBoundingClientRect();
-                    if (r.width < 10 || r.height < 10) continue;
+                    if (r.width < 12 || r.height < 12) continue;
                     const cx = r.left + r.width / 2;
                     const cy = r.top + r.height / 2;
-                    if (Math.abs(cx - trigX) < 40 && Math.abs(cy - trigY) < 25) continue;
-                    matches.push({el, cx, cy});
+                    // Не кликаем по самому слоту, который уже стоит на форме
+                    if (Math.abs(cx - trigX) < 45 && Math.abs(cy - trigY) < 25) continue;
+                    hits.push({el, cx, cy});
                 }
-                if (matches.length > 0) {
-                    const pick = matches[matches.length - 1];
-                    pick.el.scrollIntoView({block: 'nearest'});
-                    const r2 = pick.el.getBoundingClientRect();
+                if (hits.length > 0) {
+                    const chosen = hits[hits.length - 1];
+                    chosen.el.scrollIntoView({block: 'nearest'});
+                    const r2 = chosen.el.getBoundingClientRect();
                     return {x: r2.left + r2.width / 2, y: r2.top + r2.height / 2};
                 }
                 return null;
@@ -450,102 +450,76 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
         )
         if coords:
             page.mouse.click(coords["x"], coords["y"])
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(450)
             return True
 
-        # 2. Если пикер двухколоночный (отдельно часы '12' и минуты '00')
-        if ":" in target_time:
-            hh, mm = target_time.split(":", 1)
-            clicked_cols = page.evaluate(
-                """({hh, mm}) => {
-                    const lists = Array.from(document.querySelectorAll('ul, [role="listbox"], [class*="column" i], [class*="spinner" i]'))
-                        .filter(el => el.offsetParent !== null && el.children.length >= 2);
-                    if (lists.length >= 2) {
-                        const clickInList = (list, val) => {
-                            for (const item of Array.from(list.querySelectorAll('li, div, span, button'))) {
-                                if (item.offsetParent === null) continue;
-                                if ((item.innerText || item.textContent || '').trim() === val) {
-                                    item.scrollIntoView({block: 'nearest'});
-                                    item.click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        };
-                        const okH = clickInList(lists[lists.length - 2], hh);
-                        const okM = clickInList(lists[lists.length - 1], mm);
-                        return okH && okM;
-                    }
-                    return false;
-                }""",
-                {"hh": hh, "mm": mm},
-            )
-            if clicked_cols:
-                page.wait_for_timeout(400)
+        # 2. Если выпадающий список в виде <select> или активного input
+        try:
+            active_tag = page.evaluate("() => (document.activeElement && document.activeElement.tagName) || ''")
+            if active_tag == "SELECT":
+                page.keyboard.type(target_time, delay=40)
                 page.keyboard.press("Enter")
                 page.wait_for_timeout(400)
                 return True
+        except Exception:
+            pass
 
         return False
 
-    def _pick_slot(slot_idx: int, target_time: str) -> bool:
+    def _set_one_slot(idx: int, target_time: str) -> bool:
         if not target_time:
             return True
-        boxes = _get_time_boxes()
-        if len(boxes) <= slot_idx:
+        if _slot_value(idx) == target_time:
+            return True
+
+        slots = _read_time_slots()
+        if len(slots) <= idx:
             return False
 
-        b = boxes[slot_idx]
-        if b["text"] == target_time:
+        s = slots[idx]
+        # Попытка А: клик по самому слоту + выбор из открывшегося списка
+        page.mouse.click(s["x"], s["y"])
+        page.wait_for_timeout(600)
+        if _click_dropdown_item(target_time, s["x"], s["y"]) and _slot_value(idx) == target_time:
             return True
 
-        # Способ 1: Прямой ввод с клавиатуры (с двоеточием и без, для masked input)
-        for text_to_type in (target_time, target_time.replace(":", "")):
-            page.mouse.click(b["x"], b["y"])
-            page.wait_for_timeout(200)
+        # Попытка Б: клик по иконке часов правее слота + выбор из списка
+        page.mouse.click(s["right"] + 16, s["y"])
+        page.wait_for_timeout(600)
+        if _click_dropdown_item(target_time, s["x"], s["y"]) and _slot_value(idx) == target_time:
+            return True
+
+        # Попытка В: ввод с клавиатуры (если открылся инпут/маска)
+        page.mouse.click(s["x"], s["y"])
+        page.wait_for_timeout(200)
+        for raw in (target_time, target_time.replace(":", "")):
             page.keyboard.press("ControlOrMeta+A")
             page.keyboard.press("Backspace")
-            page.keyboard.type(text_to_type, delay=45)
+            page.keyboard.type(raw, delay=40)
             page.keyboard.press("Enter")
-            page.wait_for_timeout(400)
-            if _is_slot_set(slot_idx, target_time):
+            page.wait_for_timeout(350)
+            if _slot_value(idx) == target_time:
                 return True
 
-        # Способ 2: Клик по зелёной иконке часов справа + выбор из списка
-        page.mouse.click(b["iconX"], b["y"])
-        page.wait_for_timeout(650)
-        _click_popup_time(target_time, b["x"], b["y"])
-        if _is_slot_set(slot_idx, target_time):
-            return True
+        return _slot_value(idx) == target_time
 
-        # Способ 3: Клик по центру поля + выбор из списка
-        page.mouse.click(b["x"], b["y"])
-        page.wait_for_timeout(650)
-        _click_popup_time(target_time, b["x"], b["y"])
-        return _is_slot_set(slot_idx, target_time)
+    for attempt in range(3):
+        ok1 = _set_one_slot(0, time_from)
+        page.wait_for_timeout(350)
+        ok2 = _set_one_slot(1, time_to)
+        page.wait_for_timeout(300)
 
-    for attempt in range(2):
-        ok1 = _pick_slot(0, time_from)
-        page.wait_for_timeout(400)
-        ok2 = _pick_slot(1, time_to)
-        page.wait_for_timeout(400)
-
-        boxes_now = _get_time_boxes()
-        cur_from = boxes_now[0]["text"] if len(boxes_now) > 0 else "?"
-        cur_to = boxes_now[1]["text"] if len(boxes_now) > 1 else "?"
-
-        if ok1 and ok2 and cur_from == time_from and cur_to == time_to:
-            log(f"-> Время забора подтверждено: {cur_from} - {cur_to}")
+        v1 = _slot_value(0)
+        v2 = _slot_value(1)
+        if ok1 and ok2 and v1 == time_from and v2 == time_to:
+            log(f"-> Время забора проставлено и подтверждено: {v1} - {v2}")
             return
 
-        log(f"-> Попытка {attempt + 1}: сейчас в полях {cur_from} - {cur_to}, нужно {time_from} - {time_to}...")
+        log(f"-> Попытка {attempt + 1}: сейчас {v1 or '?'} - {v2 or '?'}, выставляю {time_from} - {time_to}...")
         page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(450)
 
-    boxes_final = _get_time_boxes()
-    cf = boxes_final[0]["text"] if len(boxes_final) > 0 else "?"
-    ct = boxes_final[1]["text"] if len(boxes_final) > 1 else "?"
-    log(f"[ВНИМАНИЕ] Итоговое время в полях СДЭК: {cf} - {ct} (ожидалось {time_from} - {time_to})")
+    log(f"[ВНИМАНИЕ] Время после попыток: {_slot_value(0) or '?'} - {_slot_value(1) or '?'} (ожидалось {time_from} - {time_to})")
 
 
 def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callable[[str], None]) -> bool:
@@ -980,15 +954,6 @@ def _dismiss_popups_once(page: Page, log: Callable[[str], None]) -> bool:
     return False
 
 
-def _dismiss_popups(page: Page, log: Callable[[str], None], wait_sec: float = 4.0) -> bool:
-    deadline = time.time() + wait_sec
-    while time.time() < deadline:
-        if _dismiss_popups_once(page, log):
-            return True
-        page.wait_for_timeout(350)
-    return False
-
-
 def _wait_for_cabinet_loaded(page: Page, log: Callable[[str], None], timeout_sec: int = 180) -> bool:
     """Ждёт входа в личный кабинет по URL или содержимому и сразу закрывает модалку 'ХОРОШО'."""
     deadline = time.time() + timeout_sec
@@ -1000,7 +965,7 @@ def _wait_for_cabinet_loaded(page: Page, log: Callable[[str], None], timeout_sec
             and "auth" not in url
             and url.rstrip("/") != "https://lk.cdek.ru"
         ):
-            _dismiss_popups(page, log, wait_sec=3.5)
+            _dismiss_popups_once(page, log)
             return True
 
         if _dismiss_popups_once(page, log):
@@ -1014,7 +979,7 @@ def _wait_for_cabinet_loaded(page: Page, log: Callable[[str], None], timeout_sec
                 }"""
             )
             if has_menu:
-                _dismiss_popups(page, log, wait_sec=3.5)
+                _dismiss_popups_once(page, log)
                 return True
         except Exception:
             pass
