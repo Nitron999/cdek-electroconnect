@@ -199,6 +199,74 @@ def _fill_cargo_description(page: Page, description: str, log: Callable[[str], N
     return False
 
 
+def _select_tariff_door_to_pvz(page: Page, tariff_name: str, log: Callable[[str], None]) -> None:
+    """Жёстко выбирает: Откуда = КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ, Куда = В ПВЗ, и проверяет переход на дверь-склад."""
+    log("8. Выбираю тариф: КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ -> В ПВЗ...")
+
+    def _click_by_regex(pattern_str: str) -> bool:
+        rx = re.compile(pattern_str, re.IGNORECASE)
+        try:
+            loc = page.get_by_text(rx).first
+            loc.scroll_into_view_if_needed(timeout=2000)
+            if loc.is_visible(timeout=2000):
+                loc.click(force=True, timeout=3000)
+                return True
+        except Exception:
+            pass
+
+        # Резерв через JS (устойчив к text-transform: uppercase и вложенным span)
+        try:
+            return bool(
+                page.evaluate(
+                    """(pat) => {
+                        const re = new RegExp(pat, 'i');
+                        const els = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"], label, div, span'));
+                        for (const el of els) {
+                            if (el.offsetParent === null || el.children.length > 2) continue;
+                            const txt = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                            if (re.test(txt)) {
+                                el.scrollIntoView({block: 'center'});
+                                el.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }""",
+                    pattern_str,
+                )
+            )
+        except Exception:
+            return False
+
+    # До 3 попыток, пока реально не появятся тарифы «дверь-склад»
+    switched = False
+    for attempt in range(3):
+        _click_by_regex(r"^\s*курьер\s+забер[её]т\s+по\s+адресу\s*$")
+        page.wait_for_timeout(500)
+        _click_by_regex(r"^\s*в\s+пвз\s*$")
+        page.wait_for_timeout(1500)
+
+        try:
+            has_door_sklad = page.evaluate(
+                """() => ((document.body && document.body.innerText) || '').toLowerCase().includes('дверь-склад')"""
+            )
+            if has_door_sklad:
+                switched = True
+                log("-> Режим «Курьер заберёт по адресу -> В ПВЗ» подтверждён (дверь-склад).")
+                break
+        except Exception:
+            pass
+        log(f"-> Повторно переключаю «Курьер заберёт по адресу -> В ПВЗ» (попытка {attempt + 2})...")
+
+    if not switched:
+        log("[ВНИМАНИЕ] Не удалось подтвердить переключение на «дверь-склад».")
+
+    target_tariff = (tariff_name or "Экспресс дверь-склад").strip()
+    if not _safe_click_text(page, target_tariff, timeout=4000):
+        _safe_click_text(page, "Экспресс дверь-склад", timeout=4000)
+    page.wait_for_timeout(1200)
+
+
 def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> bool:
     """Заполняет 'Дополнительный сбор за объявленную стоимость'."""
     val = str(value or "").strip()
@@ -567,26 +635,22 @@ def _download_waybill_from_order_list(page: Page, context, copies: int, log: Cal
     page.wait_for_timeout(2500)
     _dismiss_popups_once(page, log)
 
-    # Ждём появления таблицы заказов
     try:
         page.wait_for_selector("text=Создан", timeout=15000)
     except Exception:
         pass
     page.wait_for_timeout(1200)
 
-    # 1. Нажимаем на иконку «три точки» в первой (верхней) строке заказа
     log("-> Нажимаю три точки у последнего созданного заказа...")
     clicked_dots = False
     try:
         clicked_dots = bool(
             page.evaluate(
                 """() => {
-                    // Ищем первую строку таблицы заказов (tr или контейнер строки с номером заказа)
                     const rows = Array.from(document.querySelectorAll('tbody tr, [class*="order-row" i], [class*="table-row" i]'))
                         .filter(r => r.offsetParent !== null && /\\d{8,}/.test(r.innerText || ''));
                     if (rows.length > 0) {
                         const row = rows[0];
-                        // Берём самую правую кликабельную кнопку/иконку в строке (три точки)
                         const btns = Array.from(row.querySelectorAll('button, [role="button"], svg, [class*="menu" i], [class*="more" i], [class*="dots" i]'))
                             .filter(el => el.offsetParent !== null);
                         if (btns.length > 0) {
@@ -617,7 +681,6 @@ def _download_waybill_from_order_list(page: Page, context, copies: int, log: Cal
 
     page.wait_for_timeout(800)
 
-    # 2. В выпадающем меню жмём «Распечатать документы»
     log("-> Выбираю «Распечатать документы»...")
     if not _safe_click_text(page, "Распечатать документы", timeout=4000):
         log("[ВНИМАНИЕ] Пункт «Распечатать документы» не найден.")
@@ -625,7 +688,6 @@ def _download_waybill_from_order_list(page: Page, context, copies: int, log: Cal
 
     page.wait_for_timeout(1200)
 
-    # 3. Убеждаемся, что выбрана «Накладная», и ставим Количество копий = 3
     log(f"-> Выставляю «Накладная» — количество копий: {copies}...")
     _safe_click_text(page, "Накладная", timeout=2000)
     page.wait_for_timeout(300)
@@ -639,7 +701,6 @@ def _download_waybill_from_order_list(page: Page, context, copies: int, log: Cal
 
     page.wait_for_timeout(400)
 
-    # 4. Нажимаем «РАСПЕЧАТАТЬ» и ловим новую вкладку с PDF (lk.cdek.ru/print/print-order?...)
     log("-> Нажимаю «РАСПЕЧАТАТЬ» и перехватываю PDF...")
     pdf_url = None
     new_page = None
@@ -658,7 +719,6 @@ def _download_waybill_from_order_list(page: Page, context, copies: int, log: Cal
     if not pdf_url:
         return None
 
-    # 5. Скачиваем PDF напрямую через сессию браузера (с куками) и сохраняем в DOWNLOADS_DIR
     try:
         resp = context.request.get(pdf_url, timeout=30000)
         if resp.ok:
@@ -1029,18 +1089,12 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             log("-> Опускаюсь вниз и жду загрузку тарифов...")
             page.evaluate("window.scrollBy(0, 500)")
             try:
-                page.wait_for_selector("text=КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ", timeout=15000)
+                page.wait_for_selector("text=Тарифы", timeout=15000)
             except Exception:
                 page.wait_for_timeout(2000)
 
-            # --- ШАГ 7: БЛОК «ТАРИФЫ» (ВСЕГДА: КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ -> В ПВЗ) ---
-            log("8. Выбираю тариф (Курьер заберёт по адресу -> В ПВЗ -> Экспресс дверь-склад)...")
-            _safe_click_text(page, "КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ", timeout=4000, exact=True)
-            page.wait_for_timeout(400)
-            _safe_click_text(page, "В ПВЗ", timeout=4000, exact=True)
-            page.wait_for_timeout(2200)
-            _safe_click_text(page, order.get("tariff", "Экспресс дверь-склад"), timeout=5000)
-            page.wait_for_timeout(1200)
+            # --- ШАГ 7: БЛОК «ТАРИФЫ» (ЖЁСТКО: КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ -> В ПВЗ) ---
+            _select_tariff_door_to_pvz(page, order.get("tariff", "Экспресс дверь-склад"), log)
 
             # --- ШАГ 8: ДОПОЛНИТЕЛЬНЫЕ УСЛУГИ ---
             if order.get("use_insurance") and order.get("declared_value"):
