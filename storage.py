@@ -1,4 +1,3 @@
-Python
 import datetime
 import json
 import os
