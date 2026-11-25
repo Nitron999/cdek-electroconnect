@@ -120,36 +120,67 @@ def _safe_click_text(page: Page, text: str, timeout: int = 2500, exact: bool = F
         return False
 
 
-def _dismiss_popups(page: Page, log: Callable[[str], None]) -> None:
-    """Закрывает всплывающее окно 'В следующий раз вы можете войти по номеру телефона' (кнопка ХОРОШО)."""
-    page.wait_for_timeout(1200)
-    for btn_text in ("ХОРОШО", "Хорошо", "Понятно", "Закрыть"):
+def _dismiss_popups(page: Page, log: Callable[[str], None], wait_sec: float = 6.0) -> bool:
+    """Ждёт и закрывает всплывающее окно 'В следующий раз вы можете войти по номеру телефона' (кнопка ХОРОШО)."""
+    deadline = time.time() + wait_sec
+    pattern = re.compile(r"^\s*(хорошо|понятно|закрыть)\s*$", re.IGNORECASE)
+
+    while time.time() < deadline:
+        # Проверяем основную страницу и все вложенные фреймы
+        for frame in page.frames:
+            try:
+                btn = frame.get_by_role("button", name=pattern).first
+                if btn.is_visible(timeout=300):
+                    log("-> Нажимаю «ХОРОШО» во всплывающем окне...")
+                    btn.click(force=True, timeout=2000)
+                    page.wait_for_timeout(700)
+                    return True
+            except Exception:
+                pass
+
+            try:
+                loc = frame.get_by_text(pattern).first
+                if loc.is_visible(timeout=300):
+                    log("-> Нажимаю «ХОРОШО» во всплывающем окне...")
+                    loc.click(force=True, timeout=2000)
+                    page.wait_for_timeout(700)
+                    return True
+            except Exception:
+                pass
+
+        # Резерв: прямой клик через JavaScript по тексту кнопки или крестику модалки
         try:
-            btn = page.get_by_role("button", name=btn_text, exact=False).first
-            if btn.is_visible(timeout=1200):
-                log(f"-> Закрываю всплывающее окно («{btn_text}»)...")
-                btn.click(timeout=2000)
+            clicked_js = page.evaluate(
+                """() => {
+                    const targets = Array.from(document.querySelectorAll('button, a, div, span'));
+                    for (const el of targets) {
+                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        if (txt === 'хорошо' && el.offsetParent !== null) {
+                            el.click();
+                            return 'хорошо';
+                        }
+                    }
+                    const modalText = document.body.innerText || '';
+                    if (modalText.toLowerCase().includes('войти по номеру телефона')) {
+                        const closeBtn = document.querySelector('[class*="close" i], [aria-label*="close" i], [aria-label*="закрыть" i]');
+                        if (closeBtn) {
+                            closeBtn.click();
+                            return 'close';
+                        }
+                    }
+                    return null;
+                }"""
+            )
+            if clicked_js:
+                log(f"-> Закрыл всплывающее окно через JS ({clicked_js})...")
                 page.wait_for_timeout(700)
-                return
-        except Exception:
-            pass
-        try:
-            loc = page.get_by_text(btn_text, exact=True).first
-            if loc.is_visible(timeout=800):
-                log(f"-> Закрываю всплывающее окно («{btn_text}»)...")
-                loc.click(timeout=2000)
-                page.wait_for_timeout(700)
-                return
+                return True
         except Exception:
             pass
 
-    # На случай если окно без текста кнопки — жмём Escape
-    try:
-        if page.get_by_text("войти по номеру телефона", exact=False).first.is_visible(timeout=500):
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(500)
-    except Exception:
-        pass
+        page.wait_for_timeout(400)
+
+    return False
 
 
 def _fill_city_field(page: Page, field_label: str, city_value: str, use_moscow_quicklink: bool = False) -> bool:
@@ -251,16 +282,23 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             log("-> Жду загрузку кабинета (если есть капча — реши её в браузере)...")
             page.wait_for_selector("text=Новый заказ", timeout=180000)
 
-            # Закрываем всплывающее окно «В следующий раз вы можете войти по номеру телефона»
-            _dismiss_popups(page, log)
+            # Ждём и закрываем всплывающее окно «В следующий раз вы можете войти по номеру телефона»
+            _dismiss_popups(page, log, wait_sec=6.0)
 
-            # --- ШАГ 2: КЛИК «Новый заказ» ---
+            # --- ШАГ 2: КЛИК «Новый заказ» (с защитой от повторного попапа) ---
             log("3. Открываю «Новый заказ»...")
-            try:
-                page.get_by_role("link", name="Новый заказ", exact=True).first.click(timeout=4000)
-            except Exception:
-                if not _safe_click_text(page, "Новый заказ", timeout=4000, exact=True):
-                    _safe_click_text(page, "НОВЫЙ ЗАКАЗ", timeout=4000)
+            for _ in range(3):
+                _dismiss_popups(page, log, wait_sec=1.0)
+                try:
+                    page.get_by_role("link", name="Новый заказ", exact=True).first.click(timeout=3500)
+                except Exception:
+                    if not _safe_click_text(page, "Новый заказ", timeout=3500, exact=True):
+                        _safe_click_text(page, "НОВЫЙ ЗАКАЗ", timeout=3500)
+                try:
+                    page.wait_for_selector("text=О заказе", timeout=6000)
+                    break
+                except Exception:
+                    continue
 
             page.wait_for_selector("text=О заказе", timeout=30000)
             page.wait_for_timeout(1500)
@@ -271,10 +309,8 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             _click_in_section(page, "О заказе", order.get("payer", "ПО ДОГОВОРУ"))
             page.wait_for_timeout(400)
 
-            # Город отправителя — всегда Москва
             _fill_city_field(page, "Город отправителя", "Москва", use_moscow_quicklink=True)
 
-            # Город получателя — из базы / введённый в программе
             if order.get("city_to"):
                 _fill_city_field(page, "Город получателя", order["city_to"], use_moscow_quicklink=False)
 
