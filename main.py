@@ -181,6 +181,44 @@ TARIFF_OPTIONS = [
 ]
 
 
+def _normalize_recipient(item: dict) -> dict:
+    """
+    Приводит запись получателя к формату с двумя отдельными полями: company и fio.
+    Для ЮР. ЛИЦО: если ФИО не указано — подставляет название фирмы в оба поля.
+    """
+    r = dict(item)
+    rec_type = (r.get("recipient_type") or "ФИЗ. ЛИЦО").strip()
+    raw_name = (r.get("name") or "").strip()
+    company = (r.get("company") or "").strip()
+    fio = (r.get("fio") or "").strip()
+
+    if rec_type == "ЮР. ЛИЦО":
+        if not company and not fio:
+            m = re.match(r"^(.*?)\s*\(([^()]+)\)\s*$", raw_name)
+            if m:
+                company = m.group(1).strip()
+                fio = m.group(2).strip()
+            else:
+                company = raw_name
+                fio = raw_name
+        elif company and not fio:
+            fio = company
+        elif fio and not company:
+            company = fio
+        display_name = company or fio or raw_name
+    else:
+        if not fio:
+            fio = raw_name
+        display_name = fio or company or raw_name
+
+    r["recipient_type"] = rec_type
+    r["company"] = company
+    r["fio"] = fio
+    r["name"] = display_name
+    r["template"] = display_name
+    return r
+
+
 def main(page: ft.Page):
     page.title = "Электроконнект — СДЭК (Выписка накладных)"
     page.padding = 0
@@ -197,7 +235,11 @@ def main(page: ft.Page):
     page.theme_mode = th()["mode"]
     page.bgcolor = th()["page_bg"]
 
-    recipients = load_recipients()
+    raw_recipients = load_recipients()
+    recipients = [_normalize_recipient(r) for r in raw_recipients]
+    if any(r.get("company") is None or r.get("fio") is None for r in raw_recipients):
+        save_recipients(recipients)
+
     loaded_pvz: list[dict] = []
     pvz_load_seq = 0
     today = datetime.date.today()
@@ -332,7 +374,20 @@ def main(page: ft.Page):
     tf_sender_phone = styled_tf("Телефон отправителя", "+7 916 195 36 94", accent_key="sender", expand=1)
 
     dd_rec_type = styled_dd("Тип получателя", "ФИЗ. ЛИЦО", ["ФИЗ. ЛИЦО", "ЮР. ЛИЦО"], accent_key="recip", expand=1)
-    tf_rec_fio = styled_tf("ФИО / Название получателя", "", accent_key="recip", expand=2)
+    tf_rec_company = styled_tf(
+        "Фирма / Компания",
+        "",
+        hint_text='Например: ООО "Замоскворечье"',
+        accent_key="recip",
+        expand=2,
+    )
+    tf_rec_fio = styled_tf(
+        "ФИО получателя",
+        "",
+        hint_text="Если фамилии нет — подставится фирма",
+        accent_key="recip",
+        expand=2,
+    )
     tf_rec_phone = styled_tf("Телефон получателя", "", accent_key="recip", expand=1)
     tf_rec_email = styled_tf("Электронная почта", "", accent_key="recip", expand=1)
 
@@ -642,7 +697,7 @@ def main(page: ft.Page):
     # --- СПРАВОЧНИК ПОЛУЧАТЕЛЕЙ (ПРАВАЯ ПАНЕЛЬ) + РЕДАКТИРОВАНИЕ И БЕЗОПАСНОЕ УДАЛЕНИЕ ---
     tf_search = styled_tf(
         label="Поиск в базе",
-        hint_text="Имя или город...",
+        hint_text="Фирма, ФИО, телефон или город...",
         prefix_icon=ft.icons.SEARCH,
         accent_key="recip",
     )
@@ -650,57 +705,71 @@ def main(page: ft.Page):
 
     def apply_recipient(item: dict):
         nonlocal loaded_pvz
-        dd_rec_type.value = item.get("recipient_type", "ФИЗ. ЛИЦО")
-        tf_rec_fio.value = item.get("name", "")
-        tf_rec_phone.value = item.get("phone", "")
-        tf_rec_email.value = item.get("email", "")
-        tf_city_to.value = item.get("city_to", "")
-        tf_pvz_code.value = item.get("pvz_code", "")
-        tf_pvz_address.value = item.get("pvz_address", "")
+        norm = _normalize_recipient(item)
+        dd_rec_type.value = norm.get("recipient_type", "ФИЗ. ЛИЦО")
+        tf_rec_company.value = norm.get("company", "")
+        tf_rec_fio.value = norm.get("fio", "")
+        tf_rec_phone.value = norm.get("phone", "")
+        tf_rec_email.value = norm.get("email", "")
+        tf_city_to.value = norm.get("city_to", "")
+        tf_pvz_code.value = norm.get("pvz_code", "")
+        tf_pvz_address.value = norm.get("pvz_address", "")
         dd_delivery_to.value = "В ПВЗ"
-        tariff = item.get("tariff", "Экспресс дверь-склад")
+        tariff = norm.get("tariff", "Экспресс дверь-склад")
         if any(opt.key == tariff for opt in dd_tariff.options):
             dd_tariff.value = tariff
         else:
             dd_tariff.value = "Экспресс дверь-склад"
 
-        if item.get("time_from"):
-            tf_time_from.value = item["time_from"]
-        if item.get("time_to"):
-            tf_time_to.value = item["time_to"]
+        if norm.get("time_from"):
+            tf_time_from.value = norm["time_from"]
+        if norm.get("time_to"):
+            tf_time_to.value = norm["time_to"]
 
         tf_pvz_search.value = ""
         dd_pvz_type_filter.value = "Пункт выдачи"
         loaded_pvz = []
         pvz_list_view.controls.clear()
-        add_log(f"Загружен получатель: {item.get('name')} — подтягиваю ПВЗ...")
+        add_log(f"Загружен получатель: {norm.get('name')} — подтягиваю ПВЗ...")
         page.update()
 
-        if item.get("city_to"):
+        if norm.get("city_to"):
             start_pvz_fetch(
-                city=item.get("city_to", ""),
-                target_code=item.get("pvz_code", ""),
-                target_addr=item.get("pvz_address", ""),
+                city=norm.get("city_to", ""),
+                target_code=norm.get("pvz_code", ""),
+                target_addr=norm.get("pvz_address", ""),
                 auto_select=True,
             )
 
     def open_edit_recipient_dialog(item: dict):
-        orig_name = item.get("name", "")
+        norm = _normalize_recipient(item)
+        orig_name = norm.get("name", "")
         ed_type = ft.Dropdown(
             label="Тип получателя",
-            value=item.get("recipient_type", "ФИЗ. ЛИЦО"),
+            value=norm.get("recipient_type", "ФИЗ. ЛИЦО"),
             options=[ft.dropdown.Option("ФИЗ. ЛИЦО"), ft.dropdown.Option("ЮР. ЛИЦО")],
             dense=True,
         )
-        ed_name = ft.TextField(label="ФИО / Название компании", value=orig_name, dense=True)
-        ed_phone = ft.TextField(label="Телефон", value=item.get("phone", ""), dense=True)
-        ed_email = ft.TextField(label="Электронная почта", value=item.get("email", ""), dense=True)
-        ed_city = ft.TextField(label="Город получателя", value=item.get("city_to", ""), dense=True)
-        ed_pvz_code = ft.TextField(label="Код ПВЗ", value=item.get("pvz_code", ""), dense=True, width=140)
-        ed_pvz_addr = ft.TextField(label="Адрес ПВЗ", value=item.get("pvz_address", ""), dense=True, expand=True)
-        ed_time_from = ft.TextField(label="Забор с", value=item.get("time_from", "12:00"), dense=True, width=120)
-        ed_time_to = ft.TextField(label="Забор до", value=item.get("time_to", "15:00"), dense=True, width=120)
-        cur_tariff = item.get("tariff", "Экспресс дверь-склад")
+        ed_company = ft.TextField(
+            label="Фирма / Компания",
+            value=norm.get("company", ""),
+            hint_text='Например: ООО "Замоскворечье"',
+            dense=True,
+        )
+        ed_fio = ft.TextField(
+            label="ФИО получателя",
+            value=norm.get("fio", ""),
+            hint_text="Если фамилии нет — подставится фирма",
+            dense=True,
+        )
+        ed_phone = ft.TextField(label="Телефон", value=norm.get("phone", ""), dense=True)
+        ed_email = ft.TextField(label="Электронная почта", value=norm.get("email", ""), dense=True)
+        ed_city = ft.TextField(label="Город получателя", value=norm.get("city_to", ""), dense=True)
+        ed_pvz_code = ft.TextField(label="Код ПВЗ", value=norm.get("pvz_code", ""), dense=True, width=140)
+        ed_pvz_addr = ft.TextField(label="Адрес ПВЗ", value=norm.get("pvz_address", ""), dense=True, expand=True)
+        ed_time_from = ft.TextField(label="Забор с", value=norm.get("time_from", "12:00"), dense=True, width=120)
+        ed_time_to = ft.TextField(label="Забор до", value=norm.get("time_to", "15:00"), dense=True, width=120)
+        cur_tariff = norm.get("tariff", "Экспресс дверь-склад")
         if cur_tariff not in TARIFF_OPTIONS:
             cur_tariff = "Экспресс дверь-склад"
         ed_tariff = ft.Dropdown(
@@ -722,23 +791,26 @@ def main(page: ft.Page):
             page.close(dlg)
 
         def save_dlg(_):
-            new_name = (ed_name.value or "").strip()
-            if not new_name:
+            comp_val = (ed_company.value or "").strip()
+            fio_val = (ed_fio.value or "").strip()
+            if not comp_val and not fio_val:
                 return
-            updated = {
-                "name": new_name,
-                "template": new_name,
-                "recipient_type": ed_type.value,
-                "phone": (ed_phone.value or "").strip(),
-                "email": (ed_email.value or "").strip(),
-                "city_to": (ed_city.value or "").strip(),
-                "pvz_code": (ed_pvz_code.value or "").strip(),
-                "pvz_address": (ed_pvz_addr.value or "").strip(),
-                "time_from": (ed_time_from.value or "12:00").strip(),
-                "time_to": (ed_time_to.value or "15:00").strip(),
-                "delivery_to": "В ПВЗ",
-                "tariff": ed_tariff.value,
-            }
+            updated = _normalize_recipient(
+                {
+                    "recipient_type": ed_type.value,
+                    "company": comp_val,
+                    "fio": fio_val,
+                    "phone": (ed_phone.value or "").strip(),
+                    "email": (ed_email.value or "").strip(),
+                    "city_to": (ed_city.value or "").strip(),
+                    "pvz_code": (ed_pvz_code.value or "").strip(),
+                    "pvz_address": (ed_pvz_addr.value or "").strip(),
+                    "time_from": (ed_time_from.value or "12:00").strip(),
+                    "time_to": (ed_time_to.value or "15:00").strip(),
+                    "delivery_to": "В ПВЗ",
+                    "tariff": ed_tariff.value,
+                }
+            )
             nonlocal recipients
             replaced = False
             for idx, r in enumerate(recipients):
@@ -751,21 +823,23 @@ def main(page: ft.Page):
             save_recipients(recipients)
             refresh_recipients()
 
-            if (tf_rec_fio.value or "").strip().lower() == orig_name.strip().lower():
+            cur_active = (tf_rec_company.value or tf_rec_fio.value or "").strip().lower()
+            if cur_active == orig_name.strip().lower():
                 apply_recipient(updated)
 
-            add_log(f"Обновлён получатель в базе: {new_name}")
+            add_log(f"Обновлён получатель в базе: {updated['name']}")
             page.close(dlg)
 
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Редактировать получателя", weight=ft.FontWeight.BOLD),
             content=ft.Container(
-                width=500,
+                width=520,
                 content=ft.Column(
                     [
                         ed_type,
-                        ed_name,
+                        ed_company,
+                        ed_fio,
                         ft.Row([ed_phone, ed_email]),
                         ed_city,
                         ft.Row([ed_pvz_code, ed_pvz_addr]),
@@ -795,8 +869,28 @@ def main(page: ft.Page):
         query = (tf_search.value or "").strip().lower()
         recipients_list.controls.clear()
         for item in recipients:
-            if query and query not in item.get("name", "").lower() and query not in item.get("city_to", "").lower():
+            haystack = " ".join(
+                [
+                    item.get("name", ""),
+                    item.get("company", ""),
+                    item.get("fio", ""),
+                    item.get("phone", ""),
+                    item.get("city_to", ""),
+                ]
+            ).lower()
+            if query and query not in haystack:
                 continue
+
+            comp = (item.get("company") or "").strip()
+            fio = (item.get("fio") or "").strip()
+            city = (item.get("city_to") or "").strip()
+            title_text = comp or fio or item.get("name", "")
+            if comp and fio and comp.lower() != fio.lower():
+                sub_text = f"{fio} • {city}" if city else fio
+            else:
+                sub_text = city
+
+            is_org = item.get("recipient_type") == "ЮР. ЛИЦО"
             recipients_list.controls.append(
                 ft.Container(
                     bgcolor=t["item_bg"],
@@ -805,16 +899,20 @@ def main(page: ft.Page):
                     padding=ft.padding.symmetric(horizontal=10, vertical=8),
                     content=ft.Row(
                         [
-                            ft.Icon(ft.icons.PERSON, size=18, color=t["accents"]["recip"]),
+                            ft.Icon(
+                                ft.icons.BUSINESS if is_org else ft.icons.PERSON,
+                                size=18,
+                                color=t["accents"]["recip"],
+                            ),
                             ft.Column(
                                 [
                                     ft.Text(
-                                        item.get("name", ""),
+                                        title_text,
                                         size=13,
                                         weight=ft.FontWeight.W_600,
                                         color=t["text_primary"],
                                     ),
-                                    ft.Text(item.get("city_to", ""), size=11, color=t["text_secondary"]),
+                                    ft.Text(sub_text, size=11, color=t["text_secondary"]),
                                 ],
                                 spacing=1,
                                 expand=True,
@@ -837,35 +935,44 @@ def main(page: ft.Page):
         page.update()
 
     def save_current_to_base(_=None, silent: bool = False):
-        name = tf_rec_fio.value.strip()
-        if not name:
+        comp_val = tf_rec_company.value.strip()
+        fio_val = tf_rec_fio.value.strip()
+        if not comp_val and not fio_val:
             if not silent:
-                add_log("Введи ФИО получателя, чтобы сохранить в базу.")
+                add_log("Введи фирму или ФИО получателя, чтобы сохранить в базу.")
             return
-        new_item = {
-            "name": name,
-            "template": name,
-            "recipient_type": dd_rec_type.value,
-            "phone": tf_rec_phone.value.strip(),
-            "email": tf_rec_email.value.strip(),
-            "city_to": tf_city_to.value.strip(),
-            "pvz_code": tf_pvz_code.value.strip(),
-            "pvz_address": tf_pvz_address.value.strip(),
-            "time_from": tf_time_from.value.strip() or "12:00",
-            "time_to": tf_time_to.value.strip() or "15:00",
-            "delivery_to": "В ПВЗ",
-            "tariff": dd_tariff.value,
-        }
+        new_item = _normalize_recipient(
+            {
+                "recipient_type": dd_rec_type.value,
+                "company": comp_val,
+                "fio": fio_val,
+                "phone": tf_rec_phone.value.strip(),
+                "email": tf_rec_email.value.strip(),
+                "city_to": tf_city_to.value.strip(),
+                "pvz_code": tf_pvz_code.value.strip(),
+                "pvz_address": tf_pvz_address.value.strip(),
+                "time_from": tf_time_from.value.strip() or "12:00",
+                "time_to": tf_time_to.value.strip() or "15:00",
+                "delivery_to": "В ПВЗ",
+                "tariff": dd_tariff.value,
+            }
+        )
+        # Синхронизируем поля формы по правилу (если юрлицо без ФИО — подставит фирму и в ФИО)
+        tf_rec_company.value = new_item["company"]
+        tf_rec_fio.value = new_item["fio"]
+
         nonlocal recipients
-        recipients = [r for r in recipients if r.get("name", "").strip().lower() != name.lower()]
+        key_low = new_item["name"].strip().lower()
+        recipients = [r for r in recipients if r.get("name", "").strip().lower() != key_low]
         recipients.insert(0, new_item)
         save_recipients(recipients)
         refresh_recipients()
         if not silent:
-            add_log(f"Сохранено в справочник: {name}")
+            add_log(f"Сохранено в справочник: {new_item['name']}")
 
     def clear_recipient_fields(_):
         nonlocal loaded_pvz
+        tf_rec_company.value = ""
         tf_rec_fio.value = ""
         tf_rec_phone.value = ""
         tf_rec_email.value = ""
@@ -936,16 +1043,16 @@ def main(page: ft.Page):
     def queue_worker_loop():
         while True:
             payload = order_queue.get()
-            rec_name = payload.get("recipient_fio") or "Заказ"
+            rec_label = payload.get("recipient_company") or payload.get("recipient_fio") or "Заказ"
             with queue_lock:
                 queue_state["pending"] = max(0, queue_state["pending"] - 1)
-                queue_state["active"] = rec_name
+                queue_state["active"] = rec_label
             update_queue_badge()
-            add_log(f"=== Старт заказа: {rec_name} ({payload.get('city_to', '')}) ===")
+            add_log(f"=== Старт заказа: {rec_label} ({payload.get('city_to', '')}) ===")
             try:
                 run_cdek_order(payload, add_log)
             except Exception as exc:
-                add_log(f"[ОШИБКА {rec_name}]: {exc}")
+                add_log(f"[ОШИБКА {rec_label}]: {exc}")
             finally:
                 with queue_lock:
                     queue_state["active"] = None
@@ -956,9 +1063,19 @@ def main(page: ft.Page):
     threading.Thread(target=queue_worker_loop, daemon=True).start()
 
     def on_run_click(_):
-        rec_name = tf_rec_fio.value.strip()
-        if cb_auto_save.value and rec_name:
-            exists = any(r.get("name", "").strip().lower() == rec_name.lower() for r in recipients)
+        rec_type = dd_rec_type.value
+        rec_company = tf_rec_company.value.strip()
+        rec_fio = tf_rec_fio.value.strip()
+
+        if rec_type == "ЮР. ЛИЦО":
+            if rec_company and not rec_fio:
+                rec_fio = rec_company
+            elif rec_fio and not rec_company:
+                rec_company = rec_fio
+
+        rec_key = (rec_company or rec_fio).strip()
+        if cb_auto_save.value and rec_key:
+            exists = any(r.get("name", "").strip().lower() == rec_key.lower() for r in recipients)
             if not exists:
                 save_current_to_base(silent=True)
 
@@ -972,8 +1089,9 @@ def main(page: ft.Page):
             "city_to": tf_city_to.value,
             "sender_fio": tf_sender_fio.value,
             "sender_phone": tf_sender_phone.value,
-            "recipient_type": dd_rec_type.value,
-            "recipient_fio": tf_rec_fio.value,
+            "recipient_type": rec_type,
+            "recipient_company": rec_company,
+            "recipient_fio": rec_fio,
             "recipient_phone": tf_rec_phone.value,
             "recipient_email": tf_rec_email.value,
             "weight": tf_weight.value,
@@ -1002,7 +1120,7 @@ def main(page: ft.Page):
             queue_state["pending"] += 1
             pos = queue_state["pending"]
         order_queue.put(order_payload)
-        add_log(f"+ Добавлен в очередь (#{pos}): {rec_name or 'Без имени'} — {tf_city_to.value}")
+        add_log(f"+ Добавлен в очередь (#{pos}): {rec_key or 'Без имени'} — {tf_city_to.value}")
         update_queue_badge()
 
     btn_run.on_click = on_run_click
@@ -1126,8 +1244,8 @@ def main(page: ft.Page):
                         ft.icons.MOVE_TO_INBOX,
                         "recip",
                         [
-                            ft.Row([dd_rec_type, tf_rec_fio, tf_rec_phone]),
-                            ft.Row([tf_rec_email]),
+                            ft.Row([dd_rec_type, tf_rec_company, tf_rec_fio]),
+                            ft.Row([tf_rec_phone, tf_rec_email]),
                         ],
                     ),
                 ],
