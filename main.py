@@ -203,12 +203,10 @@ def main(page: ft.Page):
     today = datetime.date.today()
     tomorrow = today + datetime.timedelta(days=1)
 
-    # Очередь заказов
     order_queue: queue.Queue = queue.Queue()
     queue_state = {"active": None, "pending": 0}
     queue_lock = threading.Lock()
 
-    # Реестры элементов для мгновенного переключения тем
     themed_inputs: list[tuple[ft.Control, str]] = []
     themed_checkboxes: list[tuple[ft.Checkbox, str]] = []
     themed_section_cards: list[tuple[ft.Container, ft.Icon, ft.Text, str]] = []
@@ -348,14 +346,14 @@ def main(page: ft.Page):
     dd_pickup_from = styled_dd(
         "Откуда",
         "КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ",
-        ["КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ", "ИЗ ПВЗ"],
+        ["КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ"],
         accent_key="goods",
         expand=1,
     )
     dd_delivery_to = styled_dd(
         "Куда доставить",
         "В ПВЗ",
-        ["В ПВЗ", "В ПОСТАМАТ", "КУРЬЕРОМ ПО АДРЕСУ"],
+        ["В ПВЗ"],
         accent_key="goods",
         expand=1,
     )
@@ -373,9 +371,8 @@ def main(page: ft.Page):
     cb_attorney = styled_cb("Курьеру необходима доверенность", False, "ship")
     cb_id_doc = styled_cb("Курьеру необходим документ удостоверяющий личность", False, "ship")
 
-    # Выбор ПВЗ / постамата / адреса доставки
     tf_pvz_code = styled_tf("Код ПВЗ", "IZHV16", accent_key="ship", width=130)
-    tf_pvz_address = styled_tf("Адрес ПВЗ / постамата (или адрес доставки)", "ул. Азина, 135", accent_key="ship", expand=True)
+    tf_pvz_address = styled_tf("Адрес ПВЗ (или адрес доставки)", "ул. Азина, 135", accent_key="ship", expand=True)
 
     def clear_pvz_filter(_=None):
         tf_pvz_search.value = ""
@@ -395,7 +392,7 @@ def main(page: ft.Page):
         accent_key="ship",
         expand=True,
     )
-    dd_pvz_type_filter = styled_dd("Тип пункта", "Все", ["Все", "Пункт выдачи", "Постамат"], accent_key="ship", width=165)
+    dd_pvz_type_filter = styled_dd("Тип пункта", "Пункт выдачи", ["Все", "Пункт выдачи", "Постамат"], accent_key="ship", width=165)
     pvz_status_text = ft.Text(
         "При выборе клиента из базы ПВЗ города подгружаются автоматически.",
         size=12,
@@ -448,9 +445,12 @@ def main(page: ft.Page):
         return [tok for tok in _norm_search_text(text).split() if tok not in STOP_WORDS]
 
     def _find_best_pvz(items: list[dict], target_code: str, target_addr: str) -> dict | None:
+        # Приоритет только пунктам выдачи (не постаматам)
+        pvz_only = [it for it in items if it.get("type") != "Постамат"] or items
+
         code_low = (target_code or "").strip().lower()
         if code_low:
-            for it in items:
+            for it in pvz_only:
                 if (it.get("code") or "").strip().lower() == code_low:
                     return it
 
@@ -460,7 +460,7 @@ def main(page: ft.Page):
 
         best_item = None
         best_score = 0
-        for it in items:
+        for it in pvz_only:
             hay = _norm_search_text(f"{it.get('code', '')} {it.get('address', '')}")
             if all(tok in hay for tok in tokens):
                 return it
@@ -476,11 +476,8 @@ def main(page: ft.Page):
     def select_pvz(item: dict):
         tf_pvz_code.value = item.get("code", "")
         tf_pvz_address.value = item.get("address", "")
-        if item.get("type") == "Постамат":
-            dd_delivery_to.value = "В ПОСТАМАТ"
-        else:
-            dd_delivery_to.value = "В ПВЗ"
-        add_log(f"Выбран пункт: {item.get('code')} — {item.get('address')}")
+        dd_delivery_to.value = "В ПВЗ"
+        add_log(f"Выбран ПВЗ: {item.get('code')} — {item.get('address')}")
         render_pvz_list()
 
     def render_pvz_list(_=None):
@@ -622,10 +619,7 @@ def main(page: ft.Page):
                     tf_pvz_code.value = best.get("code", "")
                     tf_pvz_address.value = best.get("address", "")
                     tf_pvz_search.value = best.get("code", "") or best.get("address", "")
-                    if best.get("type") == "Постамат":
-                        dd_delivery_to.value = "В ПОСТАМАТ"
-                    else:
-                        dd_delivery_to.value = "В ПВЗ"
+                    dd_delivery_to.value = "В ПВЗ"
                     pvz_status_text.value = f"{msg} • Автовыбран: {best.get('code')} ({best.get('address')})"
                 else:
                     tf_pvz_search.value = ""
@@ -639,14 +633,14 @@ def main(page: ft.Page):
 
     def on_load_pvz_click(_):
         tf_pvz_search.value = ""
-        dd_pvz_type_filter.value = "Все"
+        dd_pvz_type_filter.value = "Пункт выдачи"
         start_pvz_fetch(tf_city_to.value, auto_select=False)
 
     btn_load_pvz.on_click = on_load_pvz_click
     tf_pvz_search.on_change = render_pvz_list
     dd_pvz_type_filter.on_change = render_pvz_list
 
-    # --- СПРАВОЧНИК ПОЛУЧАТЕЛЕЙ (ПРАВАЯ ПАНЕЛЬ) + РЕДАКТИРОВАНИЕ ---
+    # --- СПРАВОЧНИК ПОЛУЧАТЕЛЕЙ (ПРАВАЯ ПАНЕЛЬ) + РЕДАКТИРОВАНИЕ И БЕЗОПАСНОЕ УДАЛЕНИЕ ---
     tf_search = styled_tf(
         label="Поиск в базе",
         hint_text="Имя или город...",
@@ -664,7 +658,7 @@ def main(page: ft.Page):
         tf_city_to.value = item.get("city_to", "")
         tf_pvz_code.value = item.get("pvz_code", "")
         tf_pvz_address.value = item.get("pvz_address", "")
-        dd_delivery_to.value = item.get("delivery_to", "В ПВЗ")
+        dd_delivery_to.value = "В ПВЗ"
         tariff = item.get("tariff", "Экспресс дверь-склад")
         if any(opt.key == tariff for opt in dd_tariff.options):
             dd_tariff.value = tariff
@@ -672,13 +666,13 @@ def main(page: ft.Page):
             dd_tariff.value = "Экспресс дверь-склад"
 
         tf_pvz_search.value = ""
-        dd_pvz_type_filter.value = "Все"
+        dd_pvz_type_filter.value = "Пункт выдачи"
         loaded_pvz = []
         pvz_list_view.controls.clear()
         add_log(f"Загружен получатель: {item.get('name')} — подтягиваю ПВЗ...")
         page.update()
 
-        if item.get("delivery_to", "В ПВЗ") in ("В ПВЗ", "В ПОСТАМАТ") and item.get("city_to"):
+        if item.get("city_to"):
             start_pvz_fetch(
                 city=item.get("city_to", ""),
                 target_code=item.get("pvz_code", ""),
@@ -699,17 +693,7 @@ def main(page: ft.Page):
         ed_email = ft.TextField(label="Электронная почта", value=item.get("email", ""), dense=True)
         ed_city = ft.TextField(label="Город получателя", value=item.get("city_to", ""), dense=True)
         ed_pvz_code = ft.TextField(label="Код ПВЗ", value=item.get("pvz_code", ""), dense=True, width=140)
-        ed_pvz_addr = ft.TextField(label="Адрес ПВЗ / доставки", value=item.get("pvz_address", ""), dense=True, expand=True)
-        ed_delivery = ft.Dropdown(
-            label="Куда доставить",
-            value=item.get("delivery_to", "В ПВЗ"),
-            options=[
-                ft.dropdown.Option("В ПВЗ"),
-                ft.dropdown.Option("В ПОСТАМАТ"),
-                ft.dropdown.Option("КУРЬЕРОМ ПО АДРЕСУ"),
-            ],
-            dense=True,
-        )
+        ed_pvz_addr = ft.TextField(label="Адрес ПВЗ", value=item.get("pvz_address", ""), dense=True, expand=True)
         cur_tariff = item.get("tariff", "Экспресс дверь-склад")
         if cur_tariff not in TARIFF_OPTIONS:
             cur_tariff = "Экспресс дверь-склад"
@@ -721,6 +705,14 @@ def main(page: ft.Page):
         )
 
         def close_dlg(_=None):
+            page.close(dlg)
+
+        def delete_from_dlg(_):
+            nonlocal recipients
+            recipients = [r for r in recipients if r.get("name") != orig_name]
+            save_recipients(recipients)
+            refresh_recipients()
+            add_log(f"Удалён получатель из базы: {orig_name}")
             page.close(dlg)
 
         def save_dlg(_):
@@ -736,7 +728,7 @@ def main(page: ft.Page):
                 "city_to": (ed_city.value or "").strip(),
                 "pvz_code": (ed_pvz_code.value or "").strip(),
                 "pvz_address": (ed_pvz_addr.value or "").strip(),
-                "delivery_to": ed_delivery.value,
+                "delivery_to": "В ПВЗ",
                 "tariff": ed_tariff.value,
             }
             nonlocal recipients
@@ -751,7 +743,6 @@ def main(page: ft.Page):
             save_recipients(recipients)
             refresh_recipients()
 
-            # Если этот клиент сейчас открыт в основной форме — обновляем поля и там
             if (tf_rec_fio.value or "").strip().lower() == orig_name.strip().lower():
                 apply_recipient(updated)
 
@@ -770,25 +761,26 @@ def main(page: ft.Page):
                         ft.Row([ed_phone, ed_email]),
                         ed_city,
                         ft.Row([ed_pvz_code, ed_pvz_addr]),
-                        ft.Row([ed_delivery, ed_tariff]),
+                        ed_tariff,
                     ],
                     tight=True,
                     spacing=10,
                 ),
             ),
             actions=[
+                ft.TextButton(
+                    "Удалить клиента",
+                    icon=ft.icons.DELETE_OUTLINE,
+                    style=ft.ButtonStyle(color="#ef4444"),
+                    on_click=delete_from_dlg,
+                ),
+                ft.Container(expand=True),
                 ft.TextButton("Отмена", on_click=close_dlg),
                 ft.ElevatedButton("Сохранить", icon=ft.icons.SAVE, bgcolor="#10b981", color="#052e16", on_click=save_dlg),
             ],
-            actions_alignment=ft.MainAxisAlignment.END,
+            actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
         page.open(dlg)
-
-    def delete_recipient(item: dict):
-        nonlocal recipients
-        recipients = [r for r in recipients if r.get("name") != item.get("name")]
-        save_recipients(recipients)
-        refresh_recipients()
 
     def refresh_recipients(_=None):
         t = th()
@@ -802,7 +794,7 @@ def main(page: ft.Page):
                     bgcolor=t["item_bg"],
                     border=ft.border.all(1, t["border"]),
                     border_radius=8,
-                    padding=ft.padding.symmetric(horizontal=8, vertical=7),
+                    padding=ft.padding.symmetric(horizontal=10, vertical=8),
                     content=ft.Row(
                         [
                             ft.Icon(ft.icons.PERSON, size=18, color=t["accents"]["recip"]),
@@ -821,20 +813,13 @@ def main(page: ft.Page):
                             ),
                             ft.IconButton(
                                 icon=ft.icons.EDIT,
-                                icon_size=16,
+                                icon_size=17,
                                 icon_color=t["accents"]["order"],
-                                tooltip="Редактировать получателя",
+                                tooltip="Редактировать / удалить получателя",
                                 on_click=lambda e, it=item: open_edit_recipient_dialog(it),
                             ),
-                            ft.IconButton(
-                                icon=ft.icons.CLOSE,
-                                icon_size=16,
-                                icon_color=t["text_secondary"],
-                                tooltip="Удалить из базы",
-                                on_click=lambda e, it=item: delete_recipient(it),
-                            ),
                         ],
-                        spacing=2,
+                        spacing=4,
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
                     on_click=lambda e, it=item: apply_recipient(it),
@@ -858,7 +843,7 @@ def main(page: ft.Page):
             "city_to": tf_city_to.value.strip(),
             "pvz_code": tf_pvz_code.value.strip(),
             "pvz_address": tf_pvz_address.value.strip(),
-            "delivery_to": dd_delivery_to.value,
+            "delivery_to": "В ПВЗ",
             "tariff": dd_tariff.value,
         }
         nonlocal recipients
@@ -893,7 +878,7 @@ def main(page: ft.Page):
     themed_accent_texts.append((recipients_header, "recip"))
 
     # --- ЗАКРЕПЛЁННАЯ КНОПКА «СОЗДАТЬ ЗАКАЗ» + СЧЁТЧИК ОЧЕРЕДИ ---
-    queue_badge_text = ft.Text("Очередь: 0", size=13, weight=ft.FontWeight.BOLD, color="#34d399")
+    queue_badge_text = ft.Text("Очередь: 0 (свободно)", size=13, weight=ft.FontWeight.BOLD, color="#34d399")
     queue_badge = ft.Container(
         bgcolor="#0f2922",
         border=ft.border.all(1, "#10b981"),
@@ -986,8 +971,8 @@ def main(page: ft.Page):
             "width": tf_width.value,
             "height": tf_height.value,
             "description": tf_desc.value,
-            "pickup_from": dd_pickup_from.value,
-            "delivery_to": dd_delivery_to.value,
+            "pickup_from": "КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ",
+            "delivery_to": "В ПВЗ",
             "tariff": dd_tariff.value,
             "use_insurance": cb_insurance.value,
             "declared_value": tf_declared.value,
@@ -1051,7 +1036,7 @@ def main(page: ft.Page):
     # --- ШАПКА ---
     header_title = ft.Text('ООО «ЭЛЕКТРОКОННЕКТ» — СДЭК', size=18, weight=ft.FontWeight.BOLD, color=th()["text_primary"])
     header_subtitle = ft.Text(
-        "ИНН 5408154542 • Очередь заказов • Автоподбор ПВЗ • Автопечать SumatraPDF",
+        "ИНН 5408154542 • Очередь заказов • Всегда в ПВЗ • Автопечать 3 копий",
         size=12,
         color=th()["text_secondary"],
     )
@@ -1085,7 +1070,7 @@ def main(page: ft.Page):
     )
 
     pvz_section_label = ft.Text(
-        "Доставить в ПВЗ или постамат",
+        "Доставить в ПВЗ",
         size=13,
         weight=ft.FontWeight.BOLD,
         color=th()["accents"]["ship"],
@@ -1148,7 +1133,7 @@ def main(page: ft.Page):
                 ],
             ),
             section_card(
-                "4. ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ (ЗАБОР И ПВЗ / ПОСТАМАТ)",
+                "4. ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ (ЗАБОР И ПВЗ)",
                 ft.icons.LOCATION_ON,
                 "ship",
                 [
