@@ -102,7 +102,6 @@ def main(page: ft.Page):
         can_reveal_password=True,
         expand=1,
     )
-    tf_template = styled_tf("Шаблон заказа", "Патрушев Илья Сергеевич", accent=C_ORDER, expand=2)
     dd_role = styled_dd(
         "Кем я являюсь",
         "ОТПРАВИТЕЛЕМ",
@@ -159,6 +158,9 @@ def main(page: ft.Page):
             "Посылка дверь-склад",
             "СДЭК Документы дверь-склад",
             "Экспресс дверь-склад",
+            "Экспресс дверь-дверь",
+            "Экспресс склад-склад",
+            "Экспресс склад-дверь",
             "Супер-экспресс до 18 дверь-склад",
             "Супер-экспресс до 16 дверь-склад",
             "Магистральный экспресс дверь-склад",
@@ -194,9 +196,9 @@ def main(page: ft.Page):
         label_style=ft.TextStyle(color="#e2e8f0", size=13),
     )
 
-    # Выбор ПВЗ / постамата
+    # Выбор ПВЗ / постамата / адреса доставки
     tf_pvz_code = styled_tf("Код ПВЗ", "IZHV16", accent=C_SHIP, width=130)
-    tf_pvz_address = styled_tf("Выбранный ПВЗ / постамат", "ул. Азина, 135", accent=C_SHIP, expand=True)
+    tf_pvz_address = styled_tf("Адрес ПВЗ / постамата (или адрес доставки)", "ул. Азина, 135", accent=C_SHIP, expand=True)
     tf_pvz_search = styled_tf(
         label="Фильтр списка ПВЗ",
         hint_text="Введи улицу или код ПВЗ...",
@@ -220,6 +222,13 @@ def main(page: ft.Page):
         multiline=True,
         min_lines=2,
         max_lines=3,
+    )
+
+    cb_auto_save = ft.Checkbox(
+        label="Если получателя нет в базе — автоматически сохранять его в справочник при создании заказа",
+        value=True,
+        active_color=C_RECIP,
+        label_style=ft.TextStyle(color="#cbd5e1", size=12),
     )
 
     log_view = ft.ListView(height=72, spacing=2, auto_scroll=True)
@@ -336,7 +345,6 @@ def main(page: ft.Page):
     recipients_list = ft.ListView(expand=True, spacing=6)
 
     def apply_recipient(item: dict):
-        tf_template.value = item.get("template", item.get("name", ""))
         dd_rec_type.value = item.get("recipient_type", "ФИЗ. ЛИЦО")
         tf_rec_fio.value = item.get("name", "")
         tf_rec_phone.value = item.get("phone", "")
@@ -345,7 +353,11 @@ def main(page: ft.Page):
         tf_pvz_code.value = item.get("pvz_code", "")
         tf_pvz_address.value = item.get("pvz_address", "")
         dd_delivery_to.value = item.get("delivery_to", "В ПВЗ")
-        dd_tariff.value = item.get("tariff", "Экспресс дверь-склад")
+        tariff = item.get("tariff", "Экспресс дверь-склад")
+        if any(opt.key == tariff for opt in dd_tariff.options):
+            dd_tariff.value = tariff
+        else:
+            dd_tariff.value = "Экспресс дверь-склад"
         add_log(f"Загружен получатель: {item.get('name')}")
         page.update()
 
@@ -393,14 +405,15 @@ def main(page: ft.Page):
         recipients_header.value = f"Справочник получателей ({len(recipients)})"
         page.update()
 
-    def save_current_to_base(_):
+    def save_current_to_base(_=None, silent: bool = False):
         name = tf_rec_fio.value.strip()
         if not name:
-            add_log("Введи ФИО получателя, чтобы сохранить в базу.")
+            if not silent:
+                add_log("Введи ФИО получателя, чтобы сохранить в базу.")
             return
         new_item = {
             "name": name,
-            "template": tf_template.value.strip(),
+            "template": name,
             "recipient_type": dd_rec_type.value,
             "phone": tf_rec_phone.value.strip(),
             "email": tf_rec_email.value.strip(),
@@ -411,11 +424,22 @@ def main(page: ft.Page):
             "tariff": dd_tariff.value,
         }
         nonlocal recipients
-        recipients = [r for r in recipients if r.get("name") != name]
+        recipients = [r for r in recipients if r.get("name", "").strip().lower() != name.lower()]
         recipients.insert(0, new_item)
         save_recipients(recipients)
         refresh_recipients()
-        add_log(f"Сохранено в справочник: {name}")
+        if not silent:
+            add_log(f"Сохранено в справочник: {name}")
+
+    def clear_recipient_fields(_):
+        tf_rec_fio.value = ""
+        tf_rec_phone.value = ""
+        tf_rec_email.value = ""
+        tf_city_to.value = ""
+        tf_pvz_code.value = ""
+        tf_pvz_address.value = ""
+        add_log("Поля получателя очищены — можно вводить нового клиента.")
+        page.update()
 
     tf_search.on_change = refresh_recipients
     recipients_header = ft.Text(
@@ -440,15 +464,21 @@ def main(page: ft.Page):
     )
 
     def on_run_click(_):
+        # Автоматически сохраняем нового получателя в базу, если включена галочка
+        rec_name = tf_rec_fio.value.strip()
+        if cb_auto_save.value and rec_name:
+            exists = any(r.get("name", "").strip().lower() == rec_name.lower() for r in recipients)
+            if not exists:
+                save_current_to_base(silent=True)
+
         btn_run.disabled = True
-        btn_run.text = "ОФОРМЛЯЮ ЗАКАЗ И ПЕЧАТАЮ..."
+        btn_run.text = "ОФОРМЛЯЮ НОВЫЙ ЗАКАЗ И ПЕЧАТАЮ..."
         log_view.controls.clear()
         page.update()
 
         order_payload = {
             "login": tf_login.value,
             "password": tf_password.value,
-            "template": tf_template.value,
             "role": dd_role.value,
             "payer": dd_payer.value,
             "cost_center": tf_cost_center.value,
@@ -562,13 +592,18 @@ def main(page: ft.Page):
                         ft.Column(
                             [
                                 ft.Text('ООО «ЭЛЕКТРОКОННЕКТ» — СДЭК', size=18, weight=ft.FontWeight.BOLD, color="#ffffff"),
-                                ft.Text("ИНН 5408154542 • lk.cdek.ru • Автопечать SumatraPDF", size=12, color="#94a3b8"),
+                                ft.Text("ИНН 5408154542 • Всегда новый заказ • Автопечать SumatraPDF", size=12, color="#94a3b8"),
                             ],
                             spacing=2,
                             expand=True,
                         ),
+                        ft.OutlinedButton(
+                            "Новый клиент",
+                            icon=ft.icons.CLEAR_ALL,
+                            on_click=clear_recipient_fields,
+                        ),
                         ft.ElevatedButton(
-                            "+ В базу получателей",
+                            "+ В базу",
                             icon=ft.icons.PERSON_ADD,
                             bgcolor="#2a2210",
                             color=C_RECIP,
@@ -578,7 +613,8 @@ def main(page: ft.Page):
                             ),
                             on_click=save_current_to_base,
                         ),
-                    ]
+                    ],
+                    spacing=8,
                 ),
             ),
             section_card(
@@ -587,8 +623,8 @@ def main(page: ft.Page):
                 C_ORDER,
                 [
                     sub_card("Доступ в личный кабинет lk.cdek.ru", ft.icons.LOCK_OPEN, C_ORDER, [ft.Row([tf_login, tf_password])]),
-                    ft.Row([tf_template, dd_role, dd_payer]),
-                    ft.Row([tf_cost_center, tf_city_from, tf_city_to]),
+                    ft.Row([dd_role, dd_payer, tf_cost_center]),
+                    ft.Row([tf_city_from, tf_city_to]),
                 ],
             ),
             section_card(
@@ -655,7 +691,7 @@ def main(page: ft.Page):
                 "5. КОММЕНТАРИЙ К ЗАКАЗУ",
                 ft.icons.COMMENT,
                 C_COMMENT,
-                [tf_order_comment],
+                [tf_order_comment, cb_auto_save],
             ),
         ],
     )
