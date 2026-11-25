@@ -713,10 +713,10 @@ def _fill_order_comment(page: Page, comment: str, log: Callable[[str], None]) ->
     return False
 
 
-def _download_waybill_from_order_list(page: Page, context, copies: int, log: Callable[[str], None]) -> str | None:
+def _download_waybill_from_order_list(page: Page, context, copies: int, log: Callable[[str], None]) -> tuple[str | None, str]:
     """
-    Переходит в Список заказов -> три точки у самого верхнего заказа ->
-    Распечатать документы -> Накладная (3 копии) -> РАСПЕЧАТАТЬ ->
+    Переходит в Список заказов -> считывает трек-номер последнего заказа ->
+    три точки -> Распечатать документы -> Накладная (3 копии) -> РАСПЕЧАТАТЬ ->
     перехватывает PDF из открывшейся вкладки и сохраняет на диск для SumatraPDF.
     """
     log("14. Перехожу в «Список заказов» для печати накладной (3 копии)...")
@@ -736,48 +736,56 @@ def _download_waybill_from_order_list(page: Page, context, copies: int, log: Cal
 
     log("-> Нажимаю три точки у последнего созданного заказа...")
     clicked_dots = False
+    track_number = ""
     try:
-        clicked_dots = bool(
-            page.evaluate(
-                """() => {
-                    const rows = Array.from(document.querySelectorAll('tbody tr, [class*="order-row" i], [class*="table-row" i]'))
-                        .filter(r => r.offsetParent !== null && /\\d{8,}/.test(r.innerText || ''));
-                    if (rows.length > 0) {
-                        const row = rows[0];
-                        const btns = Array.from(row.querySelectorAll('button, [role="button"], svg, [class*="menu" i], [class*="more" i], [class*="dots" i]'))
-                            .filter(el => el.offsetParent !== null);
-                        if (btns.length > 0) {
-                            let rightmost = btns[0];
-                            let maxRight = rightmost.getBoundingClientRect().right;
-                            for (const b of btns) {
-                                const r = b.getBoundingClientRect().right;
-                                if (r >= maxRight) {
-                                    maxRight = r;
-                                    rightmost = b;
-                                }
+        res = page.evaluate(
+            """() => {
+                const rows = Array.from(document.querySelectorAll('tbody tr, [class*="order-row" i], [class*="table-row" i]'))
+                    .filter(r => r.offsetParent !== null && /\\d{8,}/.test(r.innerText || ''));
+                if (rows.length > 0) {
+                    const row = rows[0];
+                    const m = (row.innerText || '').match(/\\b(\\d{8,12})\\b/);
+                    const track = m ? m[1] : '';
+                    const btns = Array.from(row.querySelectorAll('button, [role="button"], svg, [class*="menu" i], [class*="more" i], [class*="dots" i]'))
+                        .filter(el => el.offsetParent !== null);
+                    if (btns.length > 0) {
+                        let rightmost = btns[0];
+                        let maxRight = rightmost.getBoundingClientRect().right;
+                        for (const b of btns) {
+                            const r = b.getBoundingClientRect().right;
+                            if (r >= maxRight) {
+                                maxRight = r;
+                                rightmost = b;
                             }
-                            rightmost.scrollIntoView({block: 'center'});
-                            rightmost.click();
-                            return true;
                         }
+                        rightmost.scrollIntoView({block: 'center'});
+                        rightmost.click();
+                        return {clicked: true, track: track};
                     }
-                    return false;
-                }"""
-            )
+                    return {clicked: false, track: track};
+                }
+                return {clicked: false, track: ''};
+            }"""
         )
+        if isinstance(res, dict):
+            clicked_dots = bool(res.get("clicked"))
+            track_number = str(res.get("track") or "").strip()
     except Exception:
         clicked_dots = False
 
+    if track_number:
+        log(f"-> Трек-номер заказа: {track_number}")
+
     if not clicked_dots:
         log("[ВНИМАНИЕ] Не удалось автоматически нажать три точки у заказа.")
-        return None
+        return None, track_number
 
     page.wait_for_timeout(800)
 
     log("-> Выбираю «Распечатать документы»...")
     if not _safe_click_text(page, "Распечатать документы", timeout=4000):
         log("[ВНИМАНИЕ] Пункт «Распечатать документы» не найден.")
-        return None
+        return None, track_number
 
     page.wait_for_timeout(1200)
 
@@ -807,10 +815,10 @@ def _download_waybill_from_order_list(page: Page, context, copies: int, log: Cal
         pdf_url = new_page.url
     except Exception as e:
         log(f"[ВНИМАНИЕ] Новая вкладка с PDF не открылась: {e}")
-        return None
+        return None, track_number
 
     if not pdf_url:
-        return None
+        return None, track_number
 
     try:
         resp = context.request.get(pdf_url, timeout=30000)
@@ -826,13 +834,13 @@ def _download_waybill_from_order_list(page: Page, context, copies: int, log: Cal
                     new_page.close()
             except Exception:
                 pass
-            return pdf_path
+            return pdf_path, track_number
         else:
             log(f"[ВНИМАНИЕ] Не удалось скачать PDF (код {resp.status}).")
     except Exception as e:
         log(f"[ВНИМАНИЕ] Ошибка скачивания PDF: {e}")
 
-    return None
+    return None, track_number
 
 
 def _fill_phone_in_section(page: Page, section_title: str, phone: str) -> bool:
@@ -1173,8 +1181,8 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             log("7. Заполняю товары (вес, габариты, описание груза)...")
             _fill_after_label(page, "Вес", order.get("weight", "0.5"), section_title="Товары")
             _fill_after_label(page, "Длина", order.get("length", "10"), section_title="Товары")
-            _fill_after_label(page, "Ширина", order.get("width", "10"), section_title="Товары")
-            _fill_after_label(page, "Высота", order.get("height", "5"), section_title="Товары")
+            _fill_after_label(page, "Ширина", order.get("width", "5"), section_title="Товары")
+            _fill_after_label(page, "Высота", order.get("height", "2"), section_title="Товары")
             _fill_cargo_description(page, order.get("description", "ПЛАТЫ"), log)
 
             log("-> Опускаюсь вниз и жду загрузку тарифов...")
@@ -1241,12 +1249,15 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             _safe_click_text(page, "СОЗДАТЬ ЗАКАЗ", timeout=5000)
             page.wait_for_timeout(5000)
 
-            # --- ШАГ 13: СПИСОК ЗАКАЗОВ -> ТРИ ТОЧКИ -> РАСПЕЧАТАТЬ ДОКУМЕНТЫ (3 КОПИИ) -> SUMATRAPDF ---
-            pdf_path = _download_waybill_from_order_list(page, context, copies=3, log=log)
+            # --- ШАГ 13: СПИСОК ЗАКАЗОВ -> ТРЕК-НОМЕР -> ТРИ ТОЧКИ -> РАСПЕЧАТАТЬ ДОКУМЕНТЫ (3 КОПИИ) -> SUMATRAPDF ---
+            pdf_path, track_number = _download_waybill_from_order_list(page, context, copies=3, log=log)
 
+            ok = False
             if pdf_path:
                 ok, msg = print_pdf_silent(pdf_path)
                 log(f"-> {msg}")
+
+            if pdf_path or track_number:
                 add_history_entry(
                     {
                         "recipient": order.get("recipient_company") or order.get("recipient_fio", ""),
@@ -1254,7 +1265,8 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                         "date": pickup_date,
                         "tariff": order.get("tariff", ""),
                         "pvz": pvz_query,
-                        "pdf": os.path.basename(pdf_path),
+                        "track": track_number,
+                        "pdf": os.path.basename(pdf_path) if pdf_path else "",
                         "printed": ok,
                     }
                 )
