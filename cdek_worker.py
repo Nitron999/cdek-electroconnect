@@ -214,7 +214,6 @@ def _select_tariff_door_to_pvz(page: Page, tariff_name: str, log: Callable[[str]
         except Exception:
             pass
 
-        # Резерв через JS (устойчив к text-transform: uppercase и вложенным span)
         try:
             return bool(
                 page.evaluate(
@@ -238,7 +237,6 @@ def _select_tariff_door_to_pvz(page: Page, tariff_name: str, log: Callable[[str]
         except Exception:
             return False
 
-    # До 3 попыток, пока реально не появятся тарифы «дверь-склад»
     switched = False
     for attempt in range(3):
         _click_by_regex(r"^\s*курьер\s+забер[её]т\s+по\s+адресу\s*$")
@@ -327,107 +325,187 @@ def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> 
 
 
 def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[[str], None]) -> None:
-    """Открывает выпадающие поля времени забора (с / до) и выбирает нужные часы."""
+    """
+    Надёжно выставляет время забора 'с' и 'до':
+    1) Закрывает календарь даты (Escape) и ждёт перерисовку слотов;
+    2) Находит строго два разных по X-координате поля времени (без дублей div/span);
+    3) Открывает каждое реальным кликом мыши, выбирает нужный пункт и проверяет результат.
+    """
     if not time_from and not time_to:
         return
 
-    def _open_time_slot(slot_idx: int) -> bool:
+    # Закрываем возможный календарь от поля даты
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    page.wait_for_timeout(900)
+
+    def _get_time_boxes() -> list[dict]:
+        """Возвращает отсортированный слева направо список уникальных полей времени (с координатами и текстом)."""
         try:
-            opened = page.evaluate(
-                """(idx) => {
+            return page.evaluate(
+                """() => {
                     const all = Array.from(document.querySelectorAll('*'));
                     const labelEl = all.find(el => {
                         if (el.children.length > 2) return false;
                         const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
                         return t.includes('дата и время забора');
                     });
-                    if (!labelEl) return false;
+                    if (!labelEl) return [];
 
+                    labelEl.scrollIntoView({block: 'center'});
                     let box = labelEl.parentElement;
                     for (let i = 0; i < 6 && box; i++) {
-                        const candidates = [];
-                        for (const inp of box.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])')) {
-                            if (inp.offsetParent === null) continue;
-                            const v = (inp.value || inp.placeholder || '').trim();
+                        const raw = [];
+                        // 1. Сначала проверяем input и select
+                        for (const el of box.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]), select')) {
+                            if (el.offsetParent === null || el.disabled) continue;
+                            const v = (el.value || '').trim();
                             if (/^\\d{2}:\\d{2}$/.test(v)) {
-                                candidates.push(inp);
-                            }
-                        }
-                        if (candidates.length < 2) {
-                            for (const el of box.querySelectorAll('button, div, span')) {
-                                if (el.offsetParent === null || el.children.length > 1) continue;
-                                const txt = (el.innerText || el.textContent || '').trim();
-                                if (/^\\d{2}:\\d{2}$/.test(txt)) {
-                                    candidates.push(el);
+                                const r = el.getBoundingClientRect();
+                                if (r.width > 10 && r.height > 10) {
+                                    raw.push({
+                                        tag: el.tagName,
+                                        text: v,
+                                        x: r.left + r.width / 2,
+                                        y: r.top + r.height / 2,
+                                        left: r.left,
+                                        top: r.top,
+                                    });
                                 }
                             }
                         }
-                        if (candidates.length >= 2 && candidates[idx]) {
-                            candidates[idx].scrollIntoView({block: 'center'});
-                            candidates[idx].click();
-                            return true;
+                        // 2. Если кастомные дропдауны (div/span/button) — берём только листовые элементы
+                        if (raw.length < 2) {
+                            for (const el of box.querySelectorAll('button, div, span')) {
+                                if (el.offsetParent === null) continue;
+                                const txt = (el.innerText || el.textContent || '').trim();
+                                if (!/^\\d{2}:\\d{2}$/.test(txt)) continue;
+                                // Пропускаем обёртку, если внутри есть потомок с таким же текстом ЧЧ:ММ
+                                const hasChildMatch = Array.from(el.children).some(
+                                    c => /^\\d{2}:\\d{2}$/.test((c.innerText || c.textContent || '').trim())
+                                );
+                                if (hasChildMatch) continue;
+                                const r = el.getBoundingClientRect();
+                                if (r.width > 5 && r.height > 5) {
+                                    raw.push({
+                                        tag: el.tagName,
+                                        text: txt,
+                                        x: r.left + r.width / 2,
+                                        y: r.top + r.height / 2,
+                                        left: r.left,
+                                        top: r.top,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Сортируем по строке (сверху вниз), затем слева направо и убираем дубли в радиусе 40px
+                        raw.sort((a, b) => (Math.abs(a.top - b.top) > 25 ? a.top - b.top : a.left - b.left));
+                        const unique = [];
+                        for (const item of raw) {
+                            if (!unique.some(u => Math.abs(u.x - item.x) < 40 && Math.abs(u.y - item.y) < 25)) {
+                                unique.push(item);
+                            }
+                        }
+                        if (unique.length >= 2) {
+                            return unique.slice(0, 2);
                         }
                         box = box.parentElement;
                     }
-                    return false;
-                }""",
-                slot_idx,
-            )
-            return bool(opened)
+                    return [];
+                }"""
+            ) or []
         except Exception:
+            return []
+
+    def _pick_slot(slot_idx: int, target_time: str) -> bool:
+        if not target_time:
+            return True
+        boxes = _get_time_boxes()
+        if len(boxes) <= slot_idx:
             return False
 
-    def _choose_option(target_time: str) -> bool:
-        page.wait_for_timeout(600)
-        try:
-            clicked = page.evaluate(
-                """(target) => {
-                    const els = Array.from(document.querySelectorAll('li, [role="option"], [class*="option" i], [class*="item" i], div, span, button'));
-                    for (let i = els.length - 1; i >= 0; i--) {
-                        const el = els[i];
-                        if (el.offsetParent === null || el.children.length > 1) continue;
-                        const txt = (el.innerText || el.textContent || '').trim();
-                        if (txt === target) {
-                            el.scrollIntoView({block: 'nearest'});
-                            el.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }""",
-                target_time,
-            )
-            if clicked:
-                page.wait_for_timeout(500)
-                return True
-        except Exception:
-            pass
+        box_info = boxes[slot_idx]
+        if box_info["text"] == target_time:
+            return True
 
-        try:
-            opt = page.get_by_text(target_time, exact=True).last
-            if opt.is_visible(timeout=1200):
-                opt.click(force=True, timeout=2000)
-                page.wait_for_timeout(500)
-                return True
-        except Exception:
-            pass
+        # Реальный клик мышкой по центру поля времени
+        page.mouse.click(box_info["x"], box_info["y"])
+        page.wait_for_timeout(650)
 
-        return False
+        # Ищем открывшийся пункт выпадающего списка с нужным временем (исключая само поле по координатам)
+        opt_coords = page.evaluate(
+            """({target, trigX, trigY}) => {
+                const selectors = '[role="option"], [role="listbox"] *, li, [class*="option" i], [class*="dropdown" i] *, [class*="menu" i] *, [class*="popover" i] *, [class*="list" i] div, [class*="list" i] span';
+                const els = Array.from(document.querySelectorAll(selectors));
+                const matches = [];
+                for (const el of els) {
+                    if (el.offsetParent === null) continue;
+                    if (el.tagName === 'INPUT') continue;
+                    const txt = (el.innerText || el.textContent || '').trim();
+                    if (txt !== target) continue;
+                    const hasChildMatch = Array.from(el.children).some(
+                        c => (c.innerText || c.textContent || '').trim() === target
+                    );
+                    if (hasChildMatch) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 10 || r.height < 10) continue;
+                    const cx = r.left + r.width / 2;
+                    const cy = r.top + r.height / 2;
+                    // Не кликаем по самому триггеру
+                    if (Math.abs(cx - trigX) < 35 && Math.abs(cy - trigY) < 20) continue;
+                    matches.push({el, cx, cy});
+                }
+                if (matches.length > 0) {
+                    const pick = matches[matches.length - 1];
+                    pick.el.scrollIntoView({block: 'nearest'});
+                    const r2 = pick.el.getBoundingClientRect();
+                    return {x: r2.left + r2.width / 2, y: r2.top + r2.height / 2};
+                }
+                return null;
+            }""",
+            {"target": target_time, "trigX": box_info["x"], "trigY": box_info["y"]},
+        )
 
-    ok1 = False
-    if time_from and _open_time_slot(0):
-        ok1 = _choose_option(time_from)
+        if opt_coords:
+            page.mouse.click(opt_coords["x"], opt_coords["y"])
+            page.wait_for_timeout(600)
+        else:
+            # Резерв: если поле принимает ввод с клавиатуры
+            page.keyboard.press("ControlOrMeta+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(target_time, delay=40)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(500)
 
-    ok2 = False
-    if time_to and _open_time_slot(1):
-        ok2 = _choose_option(time_to)
+        # Проверяем, применилось ли значение
+        after = _get_time_boxes()
+        return len(after) > slot_idx and after[slot_idx]["text"] == target_time
 
-    if ok1 and ok2:
-        log(f"-> Время забора установлено: {time_from} - {time_to}")
-    elif ok1 or ok2:
-        log(f"-> Время забора частично обновлено: {time_from} ({ok1}) - {time_to} ({ok2})")
-    else:
-        log(f"[ВНИМАНИЕ] Не удалось выбрать время забора {time_from} - {time_to}")
+    for attempt in range(3):
+        ok1 = _pick_slot(0, time_from)
+        page.wait_for_timeout(400)
+        ok2 = _pick_slot(1, time_to)
+        page.wait_for_timeout(300)
+
+        boxes_now = _get_time_boxes()
+        cur_from = boxes_now[0]["text"] if len(boxes_now) > 0 else "?"
+        cur_to = boxes_now[1]["text"] if len(boxes_now) > 1 else "?"
+
+        if ok1 and ok2 and cur_from == time_from and cur_to == time_to:
+            log(f"-> Время забора подтверждено: {cur_from} - {cur_to}")
+            return
+
+        log(f"-> Попытка {attempt + 1}: сейчас в полях {cur_from} - {cur_to}, нужно {time_from} - {time_to}...")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+
+    boxes_final = _get_time_boxes()
+    cf = boxes_final[0]["text"] if len(boxes_final) > 0 else "?"
+    ct = boxes_final[1]["text"] if len(boxes_final) > 1 else "?"
+    log(f"[ВНИМАНИЕ] Итоговое время в полях СДЭК: {cf} - {ct} (ожидалось {time_from} - {time_to})")
 
 
 def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callable[[str], None]) -> bool:
@@ -1123,7 +1201,6 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 section_title="Информация об отправлении",
                 press_tab=True,
             )
-            page.wait_for_timeout(600)
             _select_pickup_time(page, time_from, time_to, log)
 
             if order.get("need_attorney"):
