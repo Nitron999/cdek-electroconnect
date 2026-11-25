@@ -147,12 +147,11 @@ def _fill_cargo_description(page: Page, description: str, log: Callable[[str], N
 
 
 def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> bool:
-    """Заполняет 'Дополнительный сбор за объявленную стоимость' (подпись 'объявленная стоимость' находится ПОД полем)."""
+    """Заполняет 'Дополнительный сбор за объявленную стоимость'."""
     val = str(value or "").strip()
     if not val:
         return False
 
-    # 1. Ищем блок с текстом 'Дополнительный сбор за объявленную стоимость' и поле внутри него
     try:
         focused = page.evaluate(
             """() => {
@@ -194,7 +193,6 @@ def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> 
     except Exception:
         pass
 
-    # 2. Резерв: поле ввода прямо ПЕРЕД подписью 'объявленная стоимость'
     try:
         xp = "xpath=//*[contains(normalize-space(.), 'объявленная стоимость') and not(descendant::input)][1]/preceding::input[not(@type='hidden') and not(@type='checkbox') and not(@disabled)][1]"
         if _fill_locator(page.locator(xp).first, val, press_tab=True):
@@ -208,161 +206,232 @@ def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> 
 
 
 def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[[str], None]) -> None:
-    """Выбирает время забора 'с' (например 12:00) и 'до' (например 15:00) в выпадающих полях СДЭК."""
-    if not time_from and not time_to:
-        return
+    """Выбирает время забора 'с' (12:00) и 'до' (15:00) в полях с иконкой часов (вместо 09:00 - 18:00)."""
+    t_from = (time_from or "12:00").strip()
+    t_to = (time_to or "15:00").strip()
 
-    def _pick_time_field(field_index: int, target_time: str) -> bool:
-        if not target_time:
+    def _pick_single_time(slot_idx: int, default_val: str, target_val: str) -> bool:
+        if not target_val:
             return False
-        # Поля времени идут сразу после поля даты (index 0 = дата, index 1 = время с, index 2 = время до)
-        xp = (
-            "xpath=//*[contains(normalize-space(.), 'Дата и время забора') and not(descendant::input)][1]"
-            f"/following::input[not(@type='hidden') and not(@type='checkbox') and not(@disabled)][{field_index}]"
-        )
-        loc = page.locator(xp).first
-        try:
-            loc.scroll_into_view_if_needed(timeout=2000)
-            if not loc.is_visible(timeout=1500):
-                return False
-            loc.click()
-            page.wait_for_timeout(600)
 
-            # Пробуем кликнуть по нужному времени в открывшемся выпадающем списке
-            opt = page.get_by_text(target_time, exact=True).last
-            if opt.is_visible(timeout=1500):
-                opt.click(force=True, timeout=2000)
+        # Ищем поле времени: сначала по значению (09:00 / 18:00), затем по позиции после «Дата и время забора»
+        opened = False
+        try:
+            opened = page.evaluate(
+                """([slotIdx, defVal]) => {
+                    // 1. Поиск input с текущим значением (09:00 или 18:00)
+                    const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])'))
+                        .filter(el => el.offsetParent !== null && !el.disabled);
+                    const byVal = inputs.find(el => (el.value || '').trim() === defVal);
+                    if (byVal) {
+                        byVal.scrollIntoView({block: 'center'});
+                        byVal.click();
+                        return true;
+                    }
+                    // 2. Поиск блока/текста '09:00' или '18:00'
+                    const all = Array.from(document.querySelectorAll('div, span, button'));
+                    const textEl = all.find(el => el.children.length === 0 && (el.innerText || '').trim() === defVal && el.offsetParent !== null);
+                    if (textEl) {
+                        textEl.scrollIntoView({block: 'center'});
+                        textEl.click();
+                        return true;
+                    }
+                    return false;
+                }""",
+                [slot_idx, default_val],
+            )
+        except Exception:
+            opened = False
+
+        if not opened:
+            # Резерв: XPath после подписи «Дата и время забора» (включая readonly поля!)
+            xp = (
+                "xpath=//*[contains(normalize-space(.), 'Дата и время забора') and not(descendant::input)][1]"
+                f"/following::input[not(@type='hidden') and not(@type='checkbox') and not(@disabled)][{slot_idx}]"
+            )
+            try:
+                loc = page.locator(xp).first
+                loc.scroll_into_view_if_needed(timeout=1500)
+                if loc.is_visible(timeout=1500):
+                    loc.click(force=True)
+                    opened = True
+            except Exception:
+                pass
+
+        if not opened:
+            return False
+
+        page.wait_for_timeout(600)
+
+        # Пробуем выбрать нужное время из открывшегося выпадающего списка
+        try:
+            picked = page.evaluate(
+                """(target) => {
+                    const els = Array.from(document.querySelectorAll('li, div, span, button, option'));
+                    for (let i = els.length - 1; i >= 0; i--) {
+                        const el = els[i];
+                        if (el.children.length > 1 || el.offsetParent === null) continue;
+                        const txt = (el.innerText || el.textContent || '').trim();
+                        if (txt === target) {
+                            el.scrollIntoView({block: 'nearest'});
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                target_val,
+            )
+            if picked:
                 page.wait_for_timeout(500)
                 return True
+        except Exception:
+            pass
 
-            # Если поле позволяет ввод с клавиатуры — вводим напрямую
-            loc.press("ControlOrMeta+A")
-            loc.press("Backspace")
-            loc.type(target_time, delay=40)
+        # Если список не появился — пробуем ввести время с клавиатуры
+        try:
+            page.keyboard.press("ControlOrMeta+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(target_val, delay=40)
             page.keyboard.press("Enter")
             page.wait_for_timeout(400)
             return True
         except Exception:
             return False
 
-    ok1 = _pick_time_field(2, time_from)
-    ok2 = _pick_time_field(3, time_to)
+    ok1 = _pick_single_time(2, "09:00", t_from)
+    ok2 = _pick_single_time(3, "18:00", t_to)
     if ok1 or ok2:
-        log(f"-> Время забора установлено: {time_from} - {time_to}")
+        log(f"-> Время забора установлено: {t_from} - {t_to}")
     else:
-        log(f"[ВНИМАНИЕ] Не удалось изменить время забора на {time_from} - {time_to}")
+        log(f"[ВНИМАНИЕ] Не удалось изменить время забора на {t_from} - {t_to}")
 
 
 def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callable[[str], None]) -> bool:
-    """Нажимает 'ИЗМЕНИТЬ' в блоке 'Доставить в ПВЗ или постамат', ищет нужный пункт и выбирает его."""
+    """Вписывает код или адрес в 'Поиск по ПВЗ/постамату' прямо на странице и выбирает нужный пункт."""
     code = (pvz_code or "").strip()
     addr = (pvz_address or "").strip()
     if not code and not addr:
         return False
 
-    # Для поиска по адресу убираем 'ул.' / 'улица', чтобы СДЭК точно нашёл пункт
-    short_addr = re.sub(r"^(ул\.?|улица|пр-т\.?|проспект|б-р\.?|бульвар|ш\.?|шоссе)\s*", "", addr, flags=re.IGNORECASE).strip()
+    short_addr = re.sub(
+        r"^(ул\.?|улица|пр-т\.?|проспект|б-р\.?|бульвар|ш\.?|шоссе)\s*",
+        "",
+        addr,
+        flags=re.IGNORECASE,
+    ).strip()
     query = code if code else short_addr
 
     log(f"11. Выбираю ПВЗ/постамат: {query}...")
 
-    # 1. Нажимаем кнопку «ИЗМЕНИТЬ» рядом с «Доставить в ПВЗ или постамат»
-    clicked_change = False
-    for sel in (
-        "xpath=//*[contains(normalize-space(.), 'Доставить в ПВЗ')][last()]/following::*[normalize-space(.)='ИЗМЕНИТЬ' or normalize-space(.)='Изменить'][1]",
-        "button:has-text('ИЗМЕНИТЬ')",
-        "text=ИЗМЕНИТЬ",
-    ):
-        try:
-            btn = page.locator(sel).first
-            btn.scroll_into_view_if_needed(timeout=2000)
-            if btn.is_visible(timeout=2000):
-                btn.click(force=True, timeout=3000)
-                clicked_change = True
-                break
-        except Exception:
-            continue
-
-    if not clicked_change:
-        log("[ВНИМАНИЕ] Кнопка «ИЗМЕНИТЬ» для ПВЗ не найдена.")
-        return False
-
-    page.wait_for_timeout(1500)
-
-    # 2. Ищем поле поиска внутри открывшегося окна выбора ПВЗ
     search_selectors = [
         "input[placeholder*='Поиск по ПВЗ' i]",
         "input[placeholder*='постамат' i]",
-        "input[placeholder*='Поиск' i]",
-        "input[placeholder*='адрес' i]",
-        "input[placeholder*='улиц' i]",
-        "[role='dialog'] input[type='text']",
-        ".modal input[type='text']",
+        "xpath=//*[contains(normalize-space(.), 'Доставить в ПВЗ')][last()]/following::input[not(@type='hidden') and not(@disabled)][1]",
     ]
-    filled_search = False
+
+    # 1. Сначала проверяем, открыто ли уже поле «Поиск по ПВЗ/постамату» прямо на странице
+    search_inp = None
     for sel in search_selectors:
         try:
-            inp = page.locator(sel).last
-            if inp.is_visible(timeout=1500):
-                inp.click()
-                inp.press("ControlOrMeta+A")
-                inp.press("Backspace")
-                inp.type(query, delay=40)
-                filled_search = True
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=1200):
+                search_inp = loc
                 break
         except Exception:
             continue
 
-    if not filled_search:
-        log("[ВНИМАНИЕ] Поле поиска ПВЗ в окне СДЭК не найдено.")
+    # 2. Если поле скрыто (уже выбран какой-то пункт) — жмём «ИЗМЕНИТЬ»
+    if search_inp is None:
+        for sel in (
+            "xpath=//*[contains(normalize-space(.), 'Доставить в ПВЗ')][last()]/following::*[normalize-space(.)='ИЗМЕНИТЬ' or normalize-space(.)='Изменить'][1]",
+            "button:has-text('ИЗМЕНИТЬ')",
+            "text=ИЗМЕНИТЬ",
+        ):
+            try:
+                btn = page.locator(sel).first
+                btn.scroll_into_view_if_needed(timeout=1500)
+                if btn.is_visible(timeout=1500):
+                    btn.click(force=True, timeout=2500)
+                    page.wait_for_timeout(1200)
+                    break
+            except Exception:
+                continue
+
+        for sel in search_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=2000):
+                    search_inp = loc
+                    break
+            except Exception:
+                continue
+
+    if search_inp is None:
+        log("[ВНИМАНИЕ] Поле «Поиск по ПВЗ/постамату» не найдено!")
+        return False
+
+    # 3. Вводим запрос в поле поиска ПВЗ
+    try:
+        search_inp.scroll_into_view_if_needed(timeout=2000)
+        search_inp.click()
+        search_inp.press("ControlOrMeta+A")
+        search_inp.press("Backspace")
+        search_inp.type(query, delay=40)
+    except Exception as e:
+        log(f"[ВНИМАНИЕ] Ошибка ввода в поиск ПВЗ: {e}")
         return False
 
     page.wait_for_timeout(1800)
 
-    # 3. Кликаем по найденному пункту (по коду, по короткому адресу или по первому слову улицы + дому)
-    candidates = [c for c in (code, addr, short_addr) if c]
+    # 4. Кликаем по найденному пункту в списке слева (по коду, короткому адресу или первому пункту «Пункт выдачи» / «Постамат»)
+    candidates = [c for c in (code, short_addr, addr) if c]
     if short_addr:
-        # Например, из 'Гагарина, 76' берём 'Гагарина'
-        first_word = short_addr.split(",")[0].strip()
-        if first_word and first_word not in candidates:
-            candidates.append(first_word)
+        first_part = short_addr.split(",")[0].strip()
+        if first_part and first_part not in candidates:
+            candidates.append(first_part)
 
-    picked_item = False
+    picked = False
     for cand in candidates:
         try:
-            loc = page.get_by_text(cand, exact=False).last
-            if loc.is_visible(timeout=2000):
+            # Ищем карточку в списке ПВЗ (ниже заголовка «Доставить в ПВЗ»)
+            xp = f"xpath=//*[contains(normalize-space(.), 'Доставить в ПВЗ')][last()]/following::*[contains(translate(normalize-space(.), 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ', 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'), '{cand.lower()}') and not(self::input)][1]"
+            loc = page.locator(xp).first
+            if loc.is_visible(timeout=1800):
                 loc.click(force=True, timeout=2500)
-                picked_item = True
+                picked = True
                 break
         except Exception:
             continue
 
+    # Резерв: кликаем по первому отфильтрованному пункту в списке слева
+    if not picked:
+        for fallback_text in ("Пункт выдачи", "Постамат"):
+            try:
+                xp = f"xpath=//*[contains(normalize-space(.), 'Доставить в ПВЗ')][last()]/following::*[normalize-space(.)='{fallback_text}'][1]"
+                loc = page.locator(xp).first
+                if loc.is_visible(timeout=1500):
+                    loc.click(force=True, timeout=2500)
+                    picked = True
+                    break
+            except Exception:
+                continue
+
     page.wait_for_timeout(1000)
 
-    # 4. Нажимаем кнопку «Выбрать» / «ВЫБРАТЬ»
+    # 5. Если появилась кнопка «ВЫБРАТЬ» — нажимаем её
     for btn_text in ("ВЫБРАТЬ", "Выбрать", "Выбрать пункт"):
         try:
             btn = page.get_by_role("button", name=btn_text, exact=False).last
-            if btn.is_visible(timeout=1500):
-                btn.click(force=True, timeout=2500)
-                page.wait_for_timeout(800)
-                log(f"-> ПВЗ выбран: {query}")
-                return True
-        except Exception:
-            pass
-        try:
-            loc = page.get_by_text(btn_text, exact=True).last
-            if loc.is_visible(timeout=1000):
-                loc.click(force=True, timeout=2500)
-                page.wait_for_timeout(800)
-                log(f"-> ПВЗ выбран: {query}")
-                return True
+            if btn.is_visible(timeout=1200):
+                btn.click(force=True, timeout=2000)
+                page.wait_for_timeout(700)
+                break
         except Exception:
             pass
 
-    if picked_item:
-        log(f"-> ПВЗ кликнут: {query}")
+    if picked:
+        log(f"-> ПВЗ выбран: {query}")
         return True
 
     log(f"[ВНИМАНИЕ] Не удалось выбрать ПВЗ «{query}».")
@@ -375,7 +444,6 @@ def _fill_order_comment(page: Page, comment: str, log: Callable[[str], None]) ->
     if not text:
         return False
 
-    # 1. Через DOM — находим textarea сразу после заголовка 'Комментарий к заказу'
     try:
         focused = page.evaluate(
             """() => {
@@ -421,7 +489,6 @@ def _fill_order_comment(page: Page, comment: str, log: Callable[[str], None]) ->
     except Exception:
         pass
 
-    # 2. Резерв: последний видимый textarea на странице
     try:
         ta = page.locator("textarea").last
         if _fill_locator(ta, text, press_tab=True):
@@ -815,7 +882,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 press_tab=True,
             )
             page.wait_for_timeout(500)
-            _select_pickup_time(page, order.get("time_from", ""), order.get("time_to", ""), log)
+            _select_pickup_time(page, order.get("time_from", "12:00"), order.get("time_to", "15:00"), log)
 
             if order.get("need_attorney"):
                 _click_in_section(page, "Информация об отправлении", "Курьеру необходима доверенность", timeout=1500)
