@@ -1,13 +1,18 @@
+Python
 import datetime
 import json
 import os
 import sys
 
-if getattr(sys, "frozen", False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+def get_app_dir() -> str:
+    """Возвращает папку, в которой лежит .exe или скрипт."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = get_app_dir()
 RECIPIENTS_FILE = os.path.join(BASE_DIR, "recipients.json")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
