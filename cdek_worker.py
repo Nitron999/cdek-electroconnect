@@ -6,7 +6,6 @@ from storage import DOWNLOADS_DIR, add_history_entry
 from printer import print_pdf_silent
 
 CDEK_URL = "https://lk.cdek.ru/"
-CDEK_CREATE_URL = "https://lk.cdek.ru/order/create"
 
 
 def _safe_fill(page: Page, selectors: list[str], value: str, clear: bool = True) -> bool:
@@ -27,11 +26,11 @@ def _safe_fill(page: Page, selectors: list[str], value: str, clear: bool = True)
     return False
 
 
-def _safe_click_text(page: Page, text: str, timeout: int = 2500) -> bool:
+def _safe_click_text(page: Page, text: str, timeout: int = 2500, exact: bool = False) -> bool:
     if not text:
         return False
     try:
-        loc = page.get_by_text(text, exact=False).first
+        loc = page.get_by_text(text, exact=exact).first
         loc.click(timeout=timeout)
         return True
     except Exception:
@@ -48,8 +47,58 @@ def _fill_autocomplete(page: Page, selectors: list[str], value: str) -> bool:
     return False
 
 
+def _select_order_template(page: Page, template_name: str, log: Callable[[str], None]) -> bool:
+    """Открывает выпадающий список 'Шаблон заказа' ('Не выбрано') и выбирает шаблон."""
+    if not template_name:
+        return False
+
+    log(f"-> Выбираю шаблон заказа: {template_name}...")
+    opened = False
+    dropdown_triggers = [
+        "text=Не выбрано",
+        "xpath=//*[contains(normalize-space(text()), 'Шаблон заказа')]/following::*[contains(@class,'select') or contains(@class,'dropdown') or self::input][1]",
+        "label:has-text('Шаблон заказа') >> .. >> input",
+    ]
+    for sel in dropdown_triggers:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=2000):
+                loc.click()
+                opened = True
+                break
+        except Exception:
+            continue
+
+    if not opened:
+        return False
+
+    page.wait_for_timeout(800)
+
+    # Если внутри списка есть поле поиска — вводим название шаблона
+    try:
+        search_inp = page.locator(
+            "input[placeholder*='Поиск' i], input[placeholder*='Шаблон' i], [role='listbox'] input, .vs__search"
+        ).first
+        if search_inp.is_visible(timeout=1200):
+            search_inp.fill(template_name)
+            page.wait_for_timeout(800)
+    except Exception:
+        pass
+
+    # Кликаем по найденному шаблону в выпадающем списке
+    if _safe_click_text(page, template_name, timeout=3000):
+        page.wait_for_timeout(1500)
+        return True
+
+    # Резерв: выбираем первый пункт клавиатурой
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(1500)
+    return True
+
+
 def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
-    """Выполняет оформление заказа в lk.cdek.ru и печатает накладную через SumatraPDF."""
+    """Выполняет оформление заказа в lk.cdek.ru по алгоритму и печатает накладную через SumatraPDF."""
     login = order.get("login", "").strip()
     password = order.get("password", "").strip()
 
@@ -89,7 +138,8 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
         page = context.new_page()
 
         try:
-            log("2. Открываю lk.cdek.ru и выполняю вход...")
+            # --- ШАГ 1: ВХОД (кнопка ВОЙТИ) ---
+            log("2. Открываю lk.cdek.ru и ввожу логин/пароль...")
             page.goto(CDEK_URL, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(1500)
 
@@ -112,92 +162,103 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 ],
                 password,
             )
-            page.keyboard.press("Enter")
-            _safe_click_text(page, "Войти", timeout=2000)
+            page.wait_for_timeout(400)
 
-            log("-> Ожидаю входа в личный кабинет (если есть капча — реши её в браузере)...")
-            page.wait_for_function(
-                "() => !window.location.href.includes('login') && !window.location.href.includes('auth')",
-                timeout=180000,
-            )
+            # Жмём именно зелёную кнопку «ВОЙТИ» (а не «ВОЙТИ ЧЕРЕЗ ЕДИНУЮ ФОРМУ СДЭК»)
+            log("-> Нажимаю зелёную кнопку «ВОЙТИ»...")
+            clicked_login = False
+            try:
+                page.get_by_role("button", name="ВОЙТИ", exact=True).click(timeout=3000)
+                clicked_login = True
+            except Exception:
+                pass
+            if not clicked_login:
+                clicked_login = _safe_click_text(page, "ВОЙТИ", timeout=2500, exact=True)
+            if not clicked_login:
+                page.keyboard.press("Enter")
+
+            log("-> Жду загрузку «Список заказов» (если есть капча — реши её в браузере)...")
+            page.wait_for_selector("text=Новый заказ", timeout=180000)
+            page.wait_for_timeout(1000)
+
+            # --- ШАГ 2: КЛИК «Новый заказ» ---
+            log("3. Нажимаю «Новый заказ» в верхнем меню...")
+            try:
+                page.get_by_role("link", name="Новый заказ", exact=True).first.click(timeout=4000)
+            except Exception:
+                if not _safe_click_text(page, "Новый заказ", timeout=4000, exact=True):
+                    _safe_click_text(page, "НОВЫЙ ЗАКАЗ", timeout=4000)
+
+            page.wait_for_selector("text=О заказе", timeout=30000)
             page.wait_for_timeout(1500)
 
-            log("3. Перехожу на страницу создания заказа...")
-            page.goto(CDEK_CREATE_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(2000)
-
-            # --- БЛОК 1: О ЗАКАЗЕ ---
+            # --- ШАГ 3: БЛОК «О ЗАКАЗЕ» И ВЫБОР ШАБЛОНА ---
             log("4. Заполняю блок «О заказе»...")
+            template_selected = False
             if order.get("template"):
-                _fill_autocomplete(
-                    page,
-                    [
-                        "input[placeholder*='Шаблон' i]",
-                        "label:has-text('Шаблон заказа') >> .. >> input",
-                    ],
-                    order["template"],
-                )
-                page.wait_for_timeout(1200)
+                template_selected = _select_order_template(page, order["template"], log)
 
             _safe_click_text(page, order.get("role", "ОТПРАВИТЕЛЕМ"))
             _safe_click_text(page, order.get("payer", "ПО ДОГОВОРУ"))
 
-            if order.get("city_from"):
-                _fill_autocomplete(
-                    page,
-                    [
-                        "label:has-text('Город отправителя') >> .. >> input",
-                        "input[placeholder*='Город отправителя' i]",
-                    ],
-                    order["city_from"],
-                )
+            # Если шаблон не выбрался (или его нет в СДЭК) — заполняем города и получателя вручную
+            if not template_selected:
+                if order.get("city_from"):
+                    _fill_autocomplete(
+                        page,
+                        [
+                            "label:has-text('Город отправителя') >> .. >> input",
+                            "input[placeholder*='Город отправителя' i]",
+                        ],
+                        order["city_from"],
+                    )
 
-            if order.get("city_to"):
-                _fill_autocomplete(
-                    page,
-                    [
-                        "label:has-text('Город получателя') >> .. >> input",
-                        "input[placeholder*='Город получателя' i]",
-                    ],
-                    order["city_to"],
-                )
+                if order.get("city_to"):
+                    _fill_autocomplete(
+                        page,
+                        [
+                            "label:has-text('Город получателя') >> .. >> input",
+                            "input[placeholder*='Город получателя' i]",
+                        ],
+                        order["city_to"],
+                    )
 
-            # --- БЛОК 2: ОТПРАВИТЕЛЬ ---
-            log("5. Заполняю блок «Отправитель»...")
-            sender_section = page.locator("section, div").filter(has_text="Отправитель").first
-            try:
-                if order.get("sender_fio"):
-                    sender_section.locator("input").nth(2).fill(order["sender_fio"])
-                if order.get("sender_phone"):
-                    sender_section.locator("input").nth(3).fill(order["sender_phone"])
-            except Exception:
-                pass
+                # --- БЛОК 2: ОТПРАВИТЕЛЬ ---
+                log("5. Заполняю блок «Отправитель»...")
+                sender_section = page.locator("section, div").filter(has_text="Отправитель").first
+                try:
+                    if order.get("sender_fio"):
+                        sender_section.locator("input").nth(2).fill(order["sender_fio"])
+                    if order.get("sender_phone"):
+                        sender_section.locator("input").nth(3).fill(order["sender_phone"])
+                except Exception:
+                    pass
 
-            # --- БЛОК 3: ПОЛУЧАТЕЛЬ ---
-            log("6. Заполняю блок «Получатель»...")
-            _safe_click_text(page, order.get("recipient_type", "ФИЗ. ЛИЦО"))
-            _safe_fill(
-                page,
-                [
-                    "label:has-text('ФИО') >> nth=1 >> .. >> input",
-                    "input[name*='recipient'][name*='name' i]",
-                ],
-                order.get("recipient_fio", ""),
-            )
-            _safe_fill(
-                page,
-                [
-                    "label:has-text('Телефон') >> nth=1 >> .. >> input",
-                    "input[name*='recipient'][name*='phone' i]",
-                ],
-                order.get("recipient_phone", ""),
-            )
-            if order.get("recipient_email"):
+                # --- БЛОК 3: ПОЛУЧАТЕЛЬ ---
+                log("6. Заполняю блок «Получатель»...")
+                _safe_click_text(page, order.get("recipient_type", "ФИЗ. ЛИЦО"))
                 _safe_fill(
                     page,
-                    ["input[type='email']", "input[placeholder*='почта' i]"],
-                    order["recipient_email"],
+                    [
+                        "label:has-text('ФИО') >> nth=1 >> .. >> input",
+                        "input[name*='recipient'][name*='name' i]",
+                    ],
+                    order.get("recipient_fio", ""),
                 )
+                _safe_fill(
+                    page,
+                    [
+                        "label:has-text('Телефон') >> nth=1 >> .. >> input",
+                        "input[name*='recipient'][name*='phone' i]",
+                    ],
+                    order.get("recipient_phone", ""),
+                )
+                if order.get("recipient_email"):
+                    _safe_fill(
+                        page,
+                        ["input[type='email']", "input[placeholder*='почта' i]"],
+                        order["recipient_email"],
+                    )
 
             # --- БЛОК 4: ТОВАРЫ ---
             log("7. Заполняю габариты и описание груза...")
@@ -267,7 +328,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
 
             # --- ВЫБОР ПВЗ ИЛИ ПОСТАМАТА ---
             pvz_query = (order.get("pvz_code") or order.get("pvz_address") or "").strip()
-            if pvz_query and order.get("delivery_to") in ("В ПВЗ", "В ПОСТАМАТ"):
+            if pvz_query and order.get("delivery_to") in ("В ПВЗ", "В ПОСТАМАТ") and not template_selected:
                 log(f"11. Выбираю ПВЗ/постамат: {pvz_query}...")
                 _safe_click_text(page, "ИЗМЕНИТЬ", timeout=1500)
                 page.wait_for_timeout(800)
