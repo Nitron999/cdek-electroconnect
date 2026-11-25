@@ -189,7 +189,7 @@ def main(page: ft.Page):
     page.window.min_width = 1120
     page.window.min_height = 700
 
-    current_theme_name = "Тёмная ночь"
+    current_theme_name = "Графит и золото"
 
     def th():
         return THEMES[current_theme_name]
@@ -324,7 +324,7 @@ def main(page: ft.Page):
     )
     tf_cost_center = styled_tf("Центр затрат", "Москва", accent_key="order", expand=1)
     tf_city_from = styled_tf("Город отправителя", "Москва, Москва, Россия", accent_key="order", expand=1)
-    tf_city_to = styled_tf("Город получателя", "Ижевск, Удмуртия, Россия", accent_key="order", expand=1)
+    tf_city_to = styled_tf("Город получателя", "", accent_key="order", expand=1)
 
     # --- 2. ОТПРАВИТЕЛЬ И ПОЛУЧАТЕЛЬ ---
     tf_sender_company = styled_tf("Компания (ИНН 5408154542)", '"ЭЛЕКТРОКОННЕКТ"', accent_key="sender", expand=1)
@@ -332,8 +332,8 @@ def main(page: ft.Page):
     tf_sender_phone = styled_tf("Телефон отправителя", "+7 916 195 36 94", accent_key="sender", expand=1)
 
     dd_rec_type = styled_dd("Тип получателя", "ФИЗ. ЛИЦО", ["ФИЗ. ЛИЦО", "ЮР. ЛИЦО"], accent_key="recip", expand=1)
-    tf_rec_fio = styled_tf("ФИО / Название получателя", "Патрушев Илья Сергеевич", accent_key="recip", expand=2)
-    tf_rec_phone = styled_tf("Телефон получателя", "+7 950 152 10 79", accent_key="recip", expand=1)
+    tf_rec_fio = styled_tf("ФИО / Название получателя", "", accent_key="recip", expand=2)
+    tf_rec_phone = styled_tf("Телефон получателя", "", accent_key="recip", expand=1)
     tf_rec_email = styled_tf("Электронная почта", "", accent_key="recip", expand=1)
 
     # --- 3. ТОВАРЫ, ТАРИФ И ДОП. УСЛУГИ ---
@@ -364,15 +364,15 @@ def main(page: ft.Page):
     # --- 4. ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ ---
     tf_pickup_address = styled_tf("Адрес забора курьером", "Сущёвская, 21, офис 426", accent_key="ship", expand=2)
     tf_courier_comment = styled_tf("Комментарий для курьера", "", accent_key="ship", expand=1)
-    tf_pickup_date = styled_tf("Дата забора", tomorrow.strftime("%d.%m.%Y"), accent_key="ship", width=155)
+    tf_pickup_date = styled_tf("Дата забора", today.strftime("%d.%m.%Y"), accent_key="ship", width=155)
     tf_time_from = styled_tf("Забор с", "12:00", accent_key="ship", width=105)
     tf_time_to = styled_tf("Забор до", "15:00", accent_key="ship", width=105)
 
     cb_attorney = styled_cb("Курьеру необходима доверенность", False, "ship")
     cb_id_doc = styled_cb("Курьеру необходим документ удостоверяющий личность", False, "ship")
 
-    tf_pvz_code = styled_tf("Код ПВЗ", "IZHV16", accent_key="ship", width=130)
-    tf_pvz_address = styled_tf("Адрес ПВЗ (или адрес доставки)", "ул. Азина, 135", accent_key="ship", expand=True)
+    tf_pvz_code = styled_tf("Код ПВЗ", "", accent_key="ship", width=130)
+    tf_pvz_address = styled_tf("Адрес ПВЗ (или адрес доставки)", "", accent_key="ship", expand=True)
 
     def clear_pvz_filter(_=None):
         tf_pvz_search.value = ""
