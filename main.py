@@ -1,4 +1,5 @@
 import datetime
+import queue
 import re
 import threading
 import flet as ft
@@ -167,6 +168,18 @@ THEMES = {
     },
 }
 
+TARIFF_OPTIONS = [
+    "Посылка дверь-склад",
+    "СДЭК Документы дверь-склад",
+    "Экспресс дверь-склад",
+    "Экспресс дверь-дверь",
+    "Экспресс склад-склад",
+    "Экспресс склад-дверь",
+    "Супер-экспресс до 18 дверь-склад",
+    "Супер-экспресс до 16 дверь-склад",
+    "Магистральный экспресс дверь-склад",
+]
+
 
 def main(page: ft.Page):
     page.title = "Электроконнект — СДЭК (Выписка накладных)"
@@ -189,6 +202,11 @@ def main(page: ft.Page):
     pvz_load_seq = 0
     today = datetime.date.today()
     tomorrow = today + datetime.timedelta(days=1)
+
+    # Очередь заказов
+    order_queue: queue.Queue = queue.Queue()
+    queue_state = {"active": None, "pending": 0}
+    queue_lock = threading.Lock()
 
     # Реестры элементов для мгновенного переключения тем
     themed_inputs: list[tuple[ft.Control, str]] = []
@@ -341,23 +359,7 @@ def main(page: ft.Page):
         accent_key="goods",
         expand=1,
     )
-    dd_tariff = styled_dd(
-        "Тариф",
-        "Экспресс дверь-склад",
-        [
-            "Посылка дверь-склад",
-            "СДЭК Документы дверь-склад",
-            "Экспресс дверь-склад",
-            "Экспресс дверь-дверь",
-            "Экспресс склад-склад",
-            "Экспресс склад-дверь",
-            "Супер-экспресс до 18 дверь-склад",
-            "Супер-экспресс до 16 дверь-склад",
-            "Магистральный экспресс дверь-склад",
-        ],
-        accent_key="goods",
-        expand=2,
-    )
+    dd_tariff = styled_dd("Тариф", "Экспресс дверь-склад", TARIFF_OPTIONS, accent_key="goods", expand=2)
     cb_insurance = styled_cb("Дополнительный сбор за объявленную стоимость", True, "goods")
     tf_declared = styled_tf("Объявленная стоимость, ₽", "3000", accent_key="goods", width=210)
 
@@ -423,6 +425,8 @@ def main(page: ft.Page):
 
     def add_log(msg: str):
         log_view.controls.append(ft.Text(msg, size=12, color=th()["text_primary"]))
+        if len(log_view.controls) > 120:
+            log_view.controls.pop(0)
         page.update()
 
     def set_date(d: datetime.date):
@@ -642,7 +646,7 @@ def main(page: ft.Page):
     tf_pvz_search.on_change = render_pvz_list
     dd_pvz_type_filter.on_change = render_pvz_list
 
-    # --- СПРАВОЧНИК ПОЛУЧАТЕЛЕЙ (ПРАВАЯ ПАНЕЛЬ) ---
+    # --- СПРАВОЧНИК ПОЛУЧАТЕЛЕЙ (ПРАВАЯ ПАНЕЛЬ) + РЕДАКТИРОВАНИЕ ---
     tf_search = styled_tf(
         label="Поиск в базе",
         hint_text="Имя или город...",
@@ -674,7 +678,6 @@ def main(page: ft.Page):
         add_log(f"Загружен получатель: {item.get('name')} — подтягиваю ПВЗ...")
         page.update()
 
-        # Автоматически загружаем ПВЗ города и подбираем нужный пункт из базы
         if item.get("delivery_to", "В ПВЗ") in ("В ПВЗ", "В ПОСТАМАТ") and item.get("city_to"):
             start_pvz_fetch(
                 city=item.get("city_to", ""),
@@ -682,6 +685,104 @@ def main(page: ft.Page):
                 target_addr=item.get("pvz_address", ""),
                 auto_select=True,
             )
+
+    def open_edit_recipient_dialog(item: dict):
+        orig_name = item.get("name", "")
+        ed_type = ft.Dropdown(
+            label="Тип получателя",
+            value=item.get("recipient_type", "ФИЗ. ЛИЦО"),
+            options=[ft.dropdown.Option("ФИЗ. ЛИЦО"), ft.dropdown.Option("ЮР. ЛИЦО")],
+            dense=True,
+        )
+        ed_name = ft.TextField(label="ФИО / Название компании", value=orig_name, dense=True)
+        ed_phone = ft.TextField(label="Телефон", value=item.get("phone", ""), dense=True)
+        ed_email = ft.TextField(label="Электронная почта", value=item.get("email", ""), dense=True)
+        ed_city = ft.TextField(label="Город получателя", value=item.get("city_to", ""), dense=True)
+        ed_pvz_code = ft.TextField(label="Код ПВЗ", value=item.get("pvz_code", ""), dense=True, width=140)
+        ed_pvz_addr = ft.TextField(label="Адрес ПВЗ / доставки", value=item.get("pvz_address", ""), dense=True, expand=True)
+        ed_delivery = ft.Dropdown(
+            label="Куда доставить",
+            value=item.get("delivery_to", "В ПВЗ"),
+            options=[
+                ft.dropdown.Option("В ПВЗ"),
+                ft.dropdown.Option("В ПОСТАМАТ"),
+                ft.dropdown.Option("КУРЬЕРОМ ПО АДРЕСУ"),
+            ],
+            dense=True,
+        )
+        cur_tariff = item.get("tariff", "Экспресс дверь-склад")
+        if cur_tariff not in TARIFF_OPTIONS:
+            cur_tariff = "Экспресс дверь-склад"
+        ed_tariff = ft.Dropdown(
+            label="Тариф",
+            value=cur_tariff,
+            options=[ft.dropdown.Option(x) for x in TARIFF_OPTIONS],
+            dense=True,
+        )
+
+        def close_dlg(_=None):
+            page.close(dlg)
+
+        def save_dlg(_):
+            new_name = (ed_name.value or "").strip()
+            if not new_name:
+                return
+            updated = {
+                "name": new_name,
+                "template": new_name,
+                "recipient_type": ed_type.value,
+                "phone": (ed_phone.value or "").strip(),
+                "email": (ed_email.value or "").strip(),
+                "city_to": (ed_city.value or "").strip(),
+                "pvz_code": (ed_pvz_code.value or "").strip(),
+                "pvz_address": (ed_pvz_addr.value or "").strip(),
+                "delivery_to": ed_delivery.value,
+                "tariff": ed_tariff.value,
+            }
+            nonlocal recipients
+            replaced = False
+            for idx, r in enumerate(recipients):
+                if r.get("name", "") == orig_name:
+                    recipients[idx] = updated
+                    replaced = True
+                    break
+            if not replaced:
+                recipients.insert(0, updated)
+            save_recipients(recipients)
+            refresh_recipients()
+
+            # Если этот клиент сейчас открыт в основной форме — обновляем поля и там
+            if (tf_rec_fio.value or "").strip().lower() == orig_name.strip().lower():
+                apply_recipient(updated)
+
+            add_log(f"Обновлён получатель в базе: {new_name}")
+            page.close(dlg)
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Редактировать получателя", weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                width=500,
+                content=ft.Column(
+                    [
+                        ed_type,
+                        ed_name,
+                        ft.Row([ed_phone, ed_email]),
+                        ed_city,
+                        ft.Row([ed_pvz_code, ed_pvz_addr]),
+                        ft.Row([ed_delivery, ed_tariff]),
+                    ],
+                    tight=True,
+                    spacing=10,
+                ),
+            ),
+            actions=[
+                ft.TextButton("Отмена", on_click=close_dlg),
+                ft.ElevatedButton("Сохранить", icon=ft.icons.SAVE, bgcolor="#10b981", color="#052e16", on_click=save_dlg),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.open(dlg)
 
     def delete_recipient(item: dict):
         nonlocal recipients
@@ -701,7 +802,7 @@ def main(page: ft.Page):
                     bgcolor=t["item_bg"],
                     border=ft.border.all(1, t["border"]),
                     border_radius=8,
-                    padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                    padding=ft.padding.symmetric(horizontal=8, vertical=7),
                     content=ft.Row(
                         [
                             ft.Icon(ft.icons.PERSON, size=18, color=t["accents"]["recip"]),
@@ -719,12 +820,21 @@ def main(page: ft.Page):
                                 expand=True,
                             ),
                             ft.IconButton(
+                                icon=ft.icons.EDIT,
+                                icon_size=16,
+                                icon_color=t["accents"]["order"],
+                                tooltip="Редактировать получателя",
+                                on_click=lambda e, it=item: open_edit_recipient_dialog(it),
+                            ),
+                            ft.IconButton(
                                 icon=ft.icons.CLOSE,
                                 icon_size=16,
                                 icon_color=t["text_secondary"],
+                                tooltip="Удалить из базы",
                                 on_click=lambda e, it=item: delete_recipient(it),
                             ),
                         ],
+                        spacing=2,
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
                     on_click=lambda e, it=item: apply_recipient(it),
@@ -782,7 +892,22 @@ def main(page: ft.Page):
     )
     themed_accent_texts.append((recipients_header, "recip"))
 
-    # --- ЗАКРЕПЛЁННАЯ КНОПКА «СОЗДАТЬ ЗАКАЗ» ---
+    # --- ЗАКРЕПЛЁННАЯ КНОПКА «СОЗДАТЬ ЗАКАЗ» + СЧЁТЧИК ОЧЕРЕДИ ---
+    queue_badge_text = ft.Text("Очередь: 0", size=13, weight=ft.FontWeight.BOLD, color="#34d399")
+    queue_badge = ft.Container(
+        bgcolor="#0f2922",
+        border=ft.border.all(1, "#10b981"),
+        border_radius=10,
+        padding=ft.padding.symmetric(horizontal=14, vertical=14),
+        content=ft.Row(
+            [
+                ft.Icon(ft.icons.LAYERS, size=18, color="#34d399"),
+                queue_badge_text,
+            ],
+            spacing=6,
+        ),
+    )
+
     btn_run = ft.ElevatedButton(
         text="СОЗДАТЬ ЗАКАЗ И РАСПЕЧАТАТЬ НАКЛАДНУЮ",
         icon=ft.icons.LOCAL_SHIPPING,
@@ -796,17 +921,51 @@ def main(page: ft.Page):
         expand=True,
     )
 
+    def update_queue_badge():
+        with queue_lock:
+            active = queue_state["active"]
+            pending = queue_state["pending"]
+        if active:
+            short_name = active[:22] + ("…" if len(active) > 22 else "")
+            queue_badge_text.value = f"В работе: {short_name} | В очереди: {pending}"
+            queue_badge.bgcolor = "#2a2210"
+            queue_badge.border = ft.border.all(1, "#fbbf24")
+            queue_badge_text.color = "#fbbf24"
+        else:
+            queue_badge_text.value = "Очередь: 0 (свободно)"
+            queue_badge.bgcolor = "#0f2922"
+            queue_badge.border = ft.border.all(1, "#10b981")
+            queue_badge_text.color = "#34d399"
+        page.update()
+
+    def queue_worker_loop():
+        while True:
+            payload = order_queue.get()
+            rec_name = payload.get("recipient_fio") or "Заказ"
+            with queue_lock:
+                queue_state["pending"] = max(0, queue_state["pending"] - 1)
+                queue_state["active"] = rec_name
+            update_queue_badge()
+            add_log(f"=== Старт заказа: {rec_name} ({payload.get('city_to', '')}) ===")
+            try:
+                run_cdek_order(payload, add_log)
+            except Exception as exc:
+                add_log(f"[ОШИБКА {rec_name}]: {exc}")
+            finally:
+                with queue_lock:
+                    queue_state["active"] = None
+                refresh_history()
+                update_queue_badge()
+                order_queue.task_done()
+
+    threading.Thread(target=queue_worker_loop, daemon=True).start()
+
     def on_run_click(_):
         rec_name = tf_rec_fio.value.strip()
         if cb_auto_save.value and rec_name:
             exists = any(r.get("name", "").strip().lower() == rec_name.lower() for r in recipients)
             if not exists:
                 save_current_to_base(silent=True)
-
-        btn_run.disabled = True
-        btn_run.text = "ОФОРМЛЯЮ НОВЫЙ ЗАКАЗ И ПЕЧАТАЮ..."
-        log_view.controls.clear()
-        page.update()
 
         order_payload = {
             "login": tf_login.value,
@@ -844,18 +1003,12 @@ def main(page: ft.Page):
             "order_comment": tf_order_comment.value,
         }
 
-        def worker():
-            try:
-                run_cdek_order(order_payload, add_log)
-            except Exception as exc:
-                add_log(f"[ОШИБКА]: {exc}")
-            finally:
-                btn_run.disabled = False
-                btn_run.text = "СОЗДАТЬ ЗАКАЗ И РАСПЕЧАТАТЬ НАКЛАДНУЮ"
-                refresh_history()
-                page.update()
-
-        threading.Thread(target=worker, daemon=True).start()
+        with queue_lock:
+            queue_state["pending"] += 1
+            pos = queue_state["pending"]
+        order_queue.put(order_payload)
+        add_log(f"+ Добавлен в очередь (#{pos}): {rec_name or 'Без имени'} — {tf_city_to.value}")
+        update_queue_badge()
 
     btn_run.on_click = on_run_click
 
@@ -898,7 +1051,7 @@ def main(page: ft.Page):
     # --- ШАПКА ---
     header_title = ft.Text('ООО «ЭЛЕКТРОКОННЕКТ» — СДЭК', size=18, weight=ft.FontWeight.BOLD, color=th()["text_primary"])
     header_subtitle = ft.Text(
-        "ИНН 5408154542 • Автоподбор ПВЗ • Автопечать SumatraPDF",
+        "ИНН 5408154542 • Очередь заказов • Автоподбор ПВЗ • Автопечать SumatraPDF",
         size=12,
         color=th()["text_secondary"],
     )
@@ -916,7 +1069,7 @@ def main(page: ft.Page):
                 ft.Column([header_title, header_subtitle], spacing=2, expand=True),
                 ft.OutlinedButton("Новый клиент", icon=ft.icons.CLEAR_ALL, on_click=clear_recipient_fields),
                 ft.ElevatedButton(
-                    "+ В базу",
+                    "Сохранить в базу",
                     icon=ft.icons.PERSON_ADD,
                     bgcolor="#2a2210",
                     color="#fbbf24",
@@ -1042,7 +1195,7 @@ def main(page: ft.Page):
         border_radius=12,
         padding=12,
         border=ft.border.all(1, "#10b981"),
-        content=ft.Column([ft.Row([btn_run]), log_container], spacing=8),
+        content=ft.Column([ft.Row([btn_run, queue_badge], spacing=10), log_container], spacing=8),
     )
 
     order_tab = ft.Column(expand=True, spacing=10, controls=[scrollable_form, pinned_footer])
@@ -1235,7 +1388,7 @@ def main(page: ft.Page):
     )
 
     right_sidebar = ft.Container(
-        width=310,
+        width=325,
         bgcolor=th()["sidebar_bg"],
         padding=14,
         border=ft.border.only(left=ft.BorderSide(1, th()["border"])),
