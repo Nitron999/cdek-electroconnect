@@ -12,6 +12,7 @@ from cdek_worker import run_cdek_order
 THEMES = {
     "Тёмная ночь": {
         "mode": ft.ThemeMode.DARK,
+        "bold_ui": False,
         "page_bg": "#0b0f19",
         "sidebar_bg": "#111827",
         "card_bg": "#151d2e",
@@ -38,6 +39,7 @@ THEMES = {
     },
     "Светлая классика": {
         "mode": ft.ThemeMode.LIGHT,
+        "bold_ui": True,
         "page_bg": "#f1f5f9",
         "sidebar_bg": "#ffffff",
         "card_bg": "#ffffff",
@@ -48,22 +50,23 @@ THEMES = {
         "footer_bg": "#ffffff",
         "log_bg": "#f1f5f9",
         "border": "#cbd5e1",
-        "input_border": "#94a3b8",
-        "text_primary": "#0f172a",
-        "text_secondary": "#475569",
-        "text_checkbox": "#1e293b",
-        "pvz_addr": "#b45309",
+        "input_border": "#64748b",
+        "text_primary": "#090d16",
+        "text_secondary": "#1e293b",
+        "text_checkbox": "#090d16",
+        "pvz_addr": "#92400e",
         "accents": {
-            "order": "#0284c7",
-            "sender": "#2563eb",
-            "recip": "#d97706",
-            "goods": "#7c3aed",
-            "ship": "#059669",
-            "comment": "#e11d48",
+            "order": "#0369a1",
+            "sender": "#1d4ed8",
+            "recip": "#b45309",
+            "goods": "#6d28d9",
+            "ship": "#047857",
+            "comment": "#be123c",
         },
     },
     "Изумруд СДЭК": {
         "mode": ft.ThemeMode.DARK,
+        "bold_ui": False,
         "page_bg": "#061410",
         "sidebar_bg": "#0a1f19",
         "card_bg": "#0e2921",
@@ -90,6 +93,7 @@ THEMES = {
     },
     "Глубокий океан": {
         "mode": ft.ThemeMode.DARK,
+        "bold_ui": False,
         "page_bg": "#071120",
         "sidebar_bg": "#0b192e",
         "card_bg": "#0f223d",
@@ -116,6 +120,7 @@ THEMES = {
     },
     "Графит и золото": {
         "mode": ft.ThemeMode.DARK,
+        "bold_ui": False,
         "page_bg": "#121212",
         "sidebar_bg": "#1a1a1a",
         "card_bg": "#202020",
@@ -140,8 +145,36 @@ THEMES = {
             "comment": "#f87171",
         },
     },
+    "Чёрное золото": {
+        "mode": ft.ThemeMode.DARK,
+        "bold_ui": False,
+        "page_bg": "#050505",
+        "sidebar_bg": "#0a0a0a",
+        "card_bg": "#101010",
+        "subcard_bg": "#080808",
+        "input_bg": "#050505",
+        "item_bg": "#141414",
+        "item_selected_bg": "#241d08",
+        "footer_bg": "#0a0a0a",
+        "log_bg": "#030303",
+        "border": "#3b2f10",
+        "input_border": "#5c4818",
+        "text_primary": "#fffbeb",
+        "text_secondary": "#d4af37",
+        "text_checkbox": "#fef3c7",
+        "pvz_addr": "#facc15",
+        "accents": {
+            "order": "#f5c542",
+            "sender": "#eab308",
+            "recip": "#fbbf24",
+            "goods": "#d4af37",
+            "ship": "#34d399",
+            "comment": "#f59e0b",
+        },
+    },
     "Тёплый песок": {
         "mode": ft.ThemeMode.LIGHT,
+        "bold_ui": False,
         "page_bg": "#f5f0e6",
         "sidebar_bg": "#fbf8f1",
         "card_bg": "#fffdf9",
@@ -178,6 +211,16 @@ TARIFF_OPTIONS = [
     "Супер-экспресс до 18 дверь-склад",
     "Супер-экспресс до 16 дверь-склад",
     "Магистральный экспресс дверь-склад",
+]
+
+RU_WEEKDAYS = [
+    "Понедельник",
+    "Вторник",
+    "Среда",
+    "Четверг",
+    "Пятница",
+    "Суббота",
+    "Воскресенье",
 ]
 
 
@@ -219,6 +262,34 @@ def _normalize_recipient(item: dict) -> dict:
     return r
 
 
+def _entry_day_key(h: dict) -> str:
+    """Извлекает дату DD.MM.YYYY из записи истории (по времени создания или дате забора)."""
+    created = (h.get("created_at") or "").strip()
+    m = re.search(r"(\d{2}\.\d{2}\.\d{4})", created)
+    if m:
+        return m.group(1)
+    d = (h.get("date") or "").strip()
+    m2 = re.search(r"(\d{2}\.\d{2}\.\d{4})", d)
+    if m2:
+        return m2.group(1)
+    return datetime.date.today().strftime("%d.%m.%Y")
+
+
+def _format_day_title(day_str: str, count: int) -> str:
+    try:
+        dt = datetime.datetime.strptime(day_str, "%d.%m.%Y").date()
+        wd = RU_WEEKDAYS[dt.weekday()]
+        return f"{wd}, {day_str}  ({count} шт.)"
+    except Exception:
+        return f"{day_str}  ({count} шт.)"
+
+
+def _format_track_line(h: dict) -> str:
+    rec = (h.get("recipient") or "").strip()
+    track = (h.get("track") or "").strip()
+    return f"{rec} {track}".strip() if track else rec
+
+
 def main(page: ft.Page):
     page.title = "Электроконнект — СДЭК (Выписка накладных)"
     page.padding = 0
@@ -231,6 +302,15 @@ def main(page: ft.Page):
 
     def th():
         return THEMES[current_theme_name]
+
+    def _w_input(t):
+        return ft.FontWeight.BOLD if t.get("bold_ui") else ft.FontWeight.W_500
+
+    def _w_label(t):
+        return ft.FontWeight.BOLD if t.get("bold_ui") else ft.FontWeight.W_600
+
+    def _w_sub(t):
+        return ft.FontWeight.W_700 if t.get("bold_ui") else ft.FontWeight.NORMAL
 
     page.theme_mode = th()["mode"]
     page.bgcolor = th()["page_bg"]
@@ -257,6 +337,18 @@ def main(page: ft.Page):
     themed_secondary_texts: list[ft.Text] = []
     themed_accent_texts: list[tuple[ft.Text, str]] = []
     themed_dividers: list[ft.Divider] = []
+
+    def copy_to_clipboard(text: str, toast_msg: str):
+        if not text:
+            return
+        page.set_clipboard(text)
+        page.open(
+            ft.SnackBar(
+                content=ft.Text(toast_msg, color="#ffffff", weight=ft.FontWeight.BOLD),
+                bgcolor="#059669",
+                duration=2000,
+            )
+        )
 
     def styled_tf(
         label: str,
@@ -294,9 +386,9 @@ def main(page: ft.Page):
             border_color=t["input_border"],
             focused_border_color=accent,
             border_radius=8,
-            label_style=ft.TextStyle(color=accent, weight=ft.FontWeight.W_600, size=12),
-            text_style=ft.TextStyle(color=t["text_primary"], weight=ft.FontWeight.W_500, size=14),
-            hint_style=ft.TextStyle(color=t["text_secondary"], size=13),
+            label_style=ft.TextStyle(color=accent, weight=_w_label(t), size=12),
+            text_style=ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=14),
+            hint_style=ft.TextStyle(color=t["text_secondary"], weight=_w_sub(t), size=13),
         )
         themed_inputs.append((ctrl, accent_key))
         return ctrl
@@ -323,8 +415,8 @@ def main(page: ft.Page):
             border_color=t["input_border"],
             focused_border_color=accent,
             border_radius=8,
-            label_style=ft.TextStyle(color=accent, weight=ft.FontWeight.W_600, size=12),
-            text_style=ft.TextStyle(color=t["text_primary"], weight=ft.FontWeight.W_500, size=14),
+            label_style=ft.TextStyle(color=accent, weight=_w_label(t), size=12),
+            text_style=ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=14),
         )
         themed_inputs.append((ctrl, accent_key))
         return ctrl
@@ -335,7 +427,7 @@ def main(page: ft.Page):
             label=label,
             value=value,
             active_color=t["accents"][accent_key],
-            label_style=ft.TextStyle(color=t["text_checkbox"], size=size),
+            label_style=ft.TextStyle(color=t["text_checkbox"], weight=_w_sub(t), size=size),
         )
         themed_checkboxes.append((cb, accent_key))
         return cb
@@ -394,8 +486,8 @@ def main(page: ft.Page):
     # --- 3. ТОВАРЫ, ТАРИФ И ДОП. УСЛУГИ ---
     tf_weight = styled_tf("Вес, кг", "0.5", accent_key="goods", expand=1)
     tf_length = styled_tf("Длина, см", "10", accent_key="goods", expand=1)
-    tf_width = styled_tf("Ширина, см", "10", accent_key="goods", expand=1)
-    tf_height = styled_tf("Высота, см", "5", accent_key="goods", expand=1)
+    tf_width = styled_tf("Ширина, см", "5", accent_key="goods", expand=1)
+    tf_height = styled_tf("Высота, см", "2", accent_key="goods", expand=1)
     tf_desc = styled_tf("Описание груза", "ПЛАТЫ", accent_key="goods", expand=2)
 
     dd_pickup_from = styled_dd(
@@ -452,6 +544,7 @@ def main(page: ft.Page):
         "При выборе клиента из базы ПВЗ города подгружаются автоматически.",
         size=12,
         color=th()["text_secondary"],
+        weight=_w_sub(th()),
     )
     themed_secondary_texts.append(pvz_status_text)
     pvz_list_view = ft.ListView(height=270, spacing=6)
@@ -476,7 +569,8 @@ def main(page: ft.Page):
     log_view = ft.ListView(height=72, spacing=2, auto_scroll=True)
 
     def add_log(msg: str):
-        log_view.controls.append(ft.Text(msg, size=12, color=th()["text_primary"]))
+        t = th()
+        log_view.controls.append(ft.Text(msg, size=12, color=t["text_primary"], weight=_w_sub(t)))
         if len(log_view.controls) > 120:
             log_view.controls.pop(0)
         page.update()
@@ -583,7 +677,7 @@ def main(page: ft.Page):
                                             ft.Text(
                                                 item.get("type", ""),
                                                 size=12,
-                                                weight=ft.FontWeight.W_600,
+                                                weight=_w_label(t),
                                                 color=badge_color,
                                             ),
                                             ft.Text(
@@ -595,6 +689,7 @@ def main(page: ft.Page):
                                             ft.Text(
                                                 f"• {item.get('work_time', '')}" if item.get("work_time") else "",
                                                 size=11,
+                                                weight=_w_sub(t),
                                                 color=t["text_secondary"],
                                             ),
                                         ],
@@ -629,6 +724,7 @@ def main(page: ft.Page):
                     content=ft.Text(
                         "По фильтру ничего не найдено — нажми × в строке фильтра, чтобы показать все пункты города.",
                         size=13,
+                        weight=_w_sub(t),
                         color=t["accents"]["recip"],
                     ),
                 )
@@ -909,10 +1005,15 @@ def main(page: ft.Page):
                                     ft.Text(
                                         title_text,
                                         size=13,
-                                        weight=ft.FontWeight.W_600,
+                                        weight=_w_label(t),
                                         color=t["text_primary"],
                                     ),
-                                    ft.Text(sub_text, size=11, color=t["text_secondary"]),
+                                    ft.Text(
+                                        sub_text,
+                                        size=11,
+                                        weight=_w_sub(t),
+                                        color=t["text_secondary"],
+                                    ),
                                 ],
                                 spacing=1,
                                 expand=True,
@@ -957,7 +1058,6 @@ def main(page: ft.Page):
                 "tariff": dd_tariff.value,
             }
         )
-        # Синхронизируем поля формы по правилу (если юрлицо без ФИО — подставит фирму и в ФИО)
         tf_rec_company.value = new_item["company"]
         tf_rec_fio.value = new_item["fio"]
 
@@ -1057,6 +1157,7 @@ def main(page: ft.Page):
                 with queue_lock:
                     queue_state["active"] = None
                 refresh_history()
+                refresh_tracks()
                 update_queue_badge()
                 order_queue.task_done()
 
@@ -1166,6 +1267,7 @@ def main(page: ft.Page):
     header_subtitle = ft.Text(
         "ИНН 5408154542 • Очередь заказов • Всегда в ПВЗ • Автопечать 3 копий",
         size=12,
+        weight=_w_sub(th()),
         color=th()["text_secondary"],
     )
     themed_primary_texts.append(header_title)
@@ -1313,7 +1415,179 @@ def main(page: ft.Page):
 
     order_tab = ft.Column(expand=True, spacing=10, controls=[scrollable_form, pinned_footer])
 
-    # --- ВКЛАДКА 2: ИСТОРИЯ ---
+    # --- ВКЛАДКА 2: ТРЕКИ (СТАТИСТИКА ПО ДНЯМ С КОПИРОВАНИЕМ) ---
+    tracks_title = ft.Text(
+        "Треки ООО «ЭЛЕКТРОконнект» (0)",
+        size=18,
+        weight=ft.FontWeight.BOLD,
+        color=th()["text_primary"],
+    )
+    themed_primary_texts.append(tracks_title)
+    tracks_list = ft.ListView(expand=True, spacing=12)
+    tracks_all_lines_ref = {"lines": []}
+
+    def copy_all_tracks(_):
+        lines = tracks_all_lines_ref["lines"]
+        if not lines:
+            return
+        copy_to_clipboard("\n".join(lines), f"Скопированы все треки ({len(lines)} шт.)")
+
+    btn_copy_all_tracks = ft.ElevatedButton(
+        "КОПИРОВАТЬ ВСЁ",
+        icon=ft.icons.CONTENT_COPY,
+        bgcolor="#10b981",
+        color="#052e16",
+        style=ft.ButtonStyle(
+            shape=ft.RoundedRectangleBorder(radius=20),
+            text_style=ft.TextStyle(weight=ft.FontWeight.BOLD, size=12),
+        ),
+        on_click=copy_all_tracks,
+    )
+
+    def refresh_tracks(_=None):
+        t = th()
+        hist = load_history()
+        tracks_list.controls.clear()
+
+        grouped: dict[str, list[dict]] = {}
+        for h in hist:
+            day_k = _entry_day_key(h)
+            grouped.setdefault(day_k, []).append(h)
+
+        def _parse_day(ds: str):
+            try:
+                return datetime.datetime.strptime(ds, "%d.%m.%Y").date()
+            except Exception:
+                return datetime.date.min
+
+        sorted_days = sorted(grouped.keys(), key=_parse_day, reverse=True)
+        all_lines: list[str] = []
+        total_cnt = 0
+
+        for day_k in sorted_days:
+            items = grouped[day_k]
+            day_lines = [_format_track_line(it) for it in items if _format_track_line(it)]
+            if not day_lines:
+                continue
+            total_cnt += len(day_lines)
+            all_lines.extend(day_lines)
+
+            rows_ui = []
+            for line in day_lines:
+                rows_ui.append(
+                    ft.Row(
+                        [
+                            ft.Text(
+                                line,
+                                size=14,
+                                weight=ft.FontWeight.BOLD,
+                                color=t["text_primary"],
+                                selectable=True,
+                                expand=True,
+                            ),
+                            ft.IconButton(
+                                icon=ft.icons.CONTENT_COPY,
+                                icon_size=16,
+                                icon_color=t["text_secondary"],
+                                tooltip="Копировать строку",
+                                on_click=lambda e, ln=line: copy_to_clipboard(ln, f"Скопировано: {ln}"),
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    )
+                )
+
+            day_text_blob = "\n".join(day_lines)
+            day_card = ft.Container(
+                bgcolor=t["card_bg"],
+                border=ft.border.all(1, t["border"]),
+                border_radius=12,
+                padding=ft.padding.symmetric(horizontal=16, vertical=12),
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(ft.icons.CALENDAR_TODAY, size=15, color="#10b981"),
+                                ft.Text(
+                                    _format_day_title(day_k, len(day_lines)),
+                                    size=14,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=t["text_primary"],
+                                    expand=True,
+                                ),
+                                ft.ElevatedButton(
+                                    "КОПИРОВАТЬ ВСЁ ЗА ДЕНЬ",
+                                    icon=ft.icons.CONTENT_COPY,
+                                    bgcolor="#10b981",
+                                    color="#052e16",
+                                    height=34,
+                                    style=ft.ButtonStyle(
+                                        shape=ft.RoundedRectangleBorder(radius=20),
+                                        text_style=ft.TextStyle(weight=ft.FontWeight.BOLD, size=12),
+                                    ),
+                                    on_click=lambda e, blob=day_text_blob, dk=day_k, n=len(day_lines): copy_to_clipboard(
+                                        blob, f"Скопировано за {dk} ({n} шт.)"
+                                    ),
+                                ),
+                            ],
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        ft.Divider(height=1, color=t["border"]),
+                        ft.Column(rows_ui, spacing=2),
+                    ],
+                    spacing=10,
+                ),
+            )
+            tracks_list.controls.append(day_card)
+
+        tracks_all_lines_ref["lines"] = all_lines
+        tracks_title.value = f"Треки ООО «ЭЛЕКТРОконнект» ({total_cnt})"
+
+        if total_cnt == 0:
+            tracks_list.controls.append(
+                ft.Container(
+                    padding=20,
+                    content=ft.Text(
+                        "Пока нет оформленных отправлений. После создания заказа трек-номер появится здесь автоматически.",
+                        size=13,
+                        weight=_w_sub(t),
+                        color=t["text_secondary"],
+                    ),
+                )
+            )
+        page.update()
+
+    tracks_divider = ft.Divider(height=1, color=th()["border"])
+    themed_dividers.append(tracks_divider)
+
+    tracks_tab = ft.Column(
+        expand=True,
+        spacing=12,
+        controls=[
+            ft.Row(
+                [
+                    ft.Icon(ft.icons.RECEIPT_LONG, color="#10b981", size=24),
+                    tracks_title,
+                    ft.Container(expand=True),
+                    btn_copy_all_tracks,
+                    ft.IconButton(
+                        icon=ft.icons.REFRESH,
+                        icon_color="#10b981",
+                        tooltip="Обновить список треков",
+                        on_click=refresh_tracks,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            tracks_divider,
+            tracks_list,
+        ],
+    )
+
+    # --- ВКЛАДКА 3: ИСТОРИЯ ---
     history_list = ft.ListView(expand=True, spacing=8)
     history_title = ft.Text("История оформленных накладных", size=18, weight=ft.FontWeight.BOLD, color=th()["text_primary"])
     themed_primary_texts.append(history_title)
@@ -1322,6 +1596,7 @@ def main(page: ft.Page):
         t = th()
         history_list.controls.clear()
         for h in load_history():
+            track_part = f"Трек: {h['track']} • " if h.get("track") else ""
             history_list.controls.append(
                 ft.Container(
                     bgcolor=t["card_bg"],
@@ -1334,14 +1609,15 @@ def main(page: ft.Page):
                                 [
                                     ft.Text(h.get("recipient", ""), weight=ft.FontWeight.BOLD, color=t["text_primary"]),
                                     ft.Text(
-                                        f"{h.get('city_to', '')} • ПВЗ: {h.get('pvz', '')} • Забор: {h.get('date', '')}",
+                                        f"{track_part}{h.get('city_to', '')} • ПВЗ: {h.get('pvz', '')} • Забор: {h.get('date', '')}",
                                         size=12,
+                                        weight=_w_sub(t),
                                         color=t["text_secondary"],
                                     ),
                                 ],
                                 expand=True,
                             ),
-                            ft.Text(h.get("created_at", ""), size=12, color=t["text_secondary"]),
+                            ft.Text(h.get("created_at", ""), size=12, weight=_w_sub(t), color=t["text_secondary"]),
                             ft.Icon(
                                 ft.icons.PRINT if h.get("printed") else ft.icons.WARNING,
                                 color="#10b981" if h.get("printed") else "#f59e0b",
@@ -1356,6 +1632,11 @@ def main(page: ft.Page):
 
     def show_order(_):
         center_container.content = order_tab
+        page.update()
+
+    def show_tracks(_):
+        refresh_tracks()
+        center_container.content = tracks_tab
         page.update()
 
     def show_history(_):
@@ -1391,14 +1672,18 @@ def main(page: ft.Page):
             ctrl.fill_color = t["input_bg"]
             ctrl.border_color = t["input_border"]
             ctrl.focused_border_color = acc
-            ctrl.label_style = ft.TextStyle(color=acc, weight=ft.FontWeight.W_600, size=12)
-            ctrl.text_style = ft.TextStyle(color=t["text_primary"], weight=ft.FontWeight.W_500, size=14)
+            ctrl.label_style = ft.TextStyle(color=acc, weight=_w_label(t), size=12)
+            ctrl.text_style = ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=14)
             if hasattr(ctrl, "hint_style"):
-                ctrl.hint_style = ft.TextStyle(color=t["text_secondary"], size=13)
+                ctrl.hint_style = ft.TextStyle(color=t["text_secondary"], weight=_w_sub(t), size=13)
 
         for cb, akey in themed_checkboxes:
             cb.active_color = t["accents"][akey]
-            cb.label_style = ft.TextStyle(color=t["text_checkbox"], size=cb.label_style.size if cb.label_style else 13)
+            cb.label_style = ft.TextStyle(
+                color=t["text_checkbox"],
+                weight=_w_sub(t),
+                size=cb.label_style.size if cb.label_style else 13,
+            )
 
         for box, ic, tx, akey in themed_section_cards:
             acc = t["accents"][akey]
@@ -1421,15 +1706,22 @@ def main(page: ft.Page):
 
         for tx in themed_primary_texts:
             tx.color = t["text_primary"]
+            tx.weight = ft.FontWeight.BOLD
         for tx in themed_secondary_texts:
             tx.color = t["text_secondary"]
+            tx.weight = _w_sub(t)
         for tx, akey in themed_accent_texts:
             tx.color = t["accents"][akey]
         for dv in themed_dividers:
             dv.color = t["border"]
+        for log_tx in log_view.controls:
+            if isinstance(log_tx, ft.Text):
+                log_tx.color = t["text_primary"]
+                log_tx.weight = _w_sub(t)
 
         render_pvz_list()
         refresh_recipients()
+        refresh_tracks()
         refresh_history()
         page.update()
 
@@ -1447,7 +1739,7 @@ def main(page: ft.Page):
                 ft.Text(
                     "Автопечать SumatraPDF готова" if sumatra_ok else "SumatraPDF.exe не найден",
                     size=11,
-                    weight=ft.FontWeight.W_600,
+                    weight=ft.FontWeight.BOLD,
                     color="#10b981" if sumatra_ok else "#ef4444",
                 ),
             ]
@@ -1455,13 +1747,15 @@ def main(page: ft.Page):
     )
 
     brand_title = ft.Text("СДЭК", weight=ft.FontWeight.BOLD, size=16, color=th()["text_primary"])
-    brand_sub = ft.Text("Выписка накладных", size=11, color=th()["text_secondary"])
-    nav_order_title = ft.Text("Электроконнект", size=13, weight=ft.FontWeight.W_600, color=th()["text_primary"])
-    nav_order_sub = ft.Text("Оформление СДЭК", size=11, color=th()["text_secondary"])
-    nav_hist_title = ft.Text("История", size=13, weight=ft.FontWeight.W_600, color=th()["text_primary"])
-    nav_hist_sub = ft.Text("Архив накладных", size=11, color=th()["text_secondary"])
-    themed_primary_texts.extend([brand_title, nav_order_title, nav_hist_title])
-    themed_secondary_texts.extend([brand_sub, nav_order_sub, nav_hist_sub])
+    brand_sub = ft.Text("Выписка накладных", size=11, weight=_w_sub(th()), color=th()["text_secondary"])
+    nav_order_title = ft.Text("Электроконнект", size=13, weight=ft.FontWeight.BOLD, color=th()["text_primary"])
+    nav_order_sub = ft.Text("Оформление СДЭК", size=11, weight=_w_sub(th()), color=th()["text_secondary"])
+    nav_tracks_title = ft.Text("Треки", size=13, weight=ft.FontWeight.BOLD, color=th()["text_primary"])
+    nav_tracks_sub = ft.Text("Копировать за день", size=11, weight=_w_sub(th()), color=th()["text_secondary"])
+    nav_hist_title = ft.Text("История", size=13, weight=ft.FontWeight.BOLD, color=th()["text_primary"])
+    nav_hist_sub = ft.Text("Архив накладных", size=11, weight=_w_sub(th()), color=th()["text_secondary"])
+    themed_primary_texts.extend([brand_title, nav_order_title, nav_tracks_title, nav_hist_title])
+    themed_secondary_texts.extend([brand_sub, nav_order_sub, nav_tracks_sub, nav_hist_sub])
 
     left_divider = ft.Divider(color=th()["border"])
     themed_dividers.append(left_divider)
@@ -1487,6 +1781,12 @@ def main(page: ft.Page):
                     on_click=show_order,
                 ),
                 ft.ListTile(
+                    leading=ft.Icon(ft.icons.RECEIPT_LONG, color="#10b981"),
+                    title=nav_tracks_title,
+                    subtitle=nav_tracks_sub,
+                    on_click=show_tracks,
+                ),
+                ft.ListTile(
                     leading=ft.Icon(ft.icons.HISTORY, color="#94a3b8"),
                     title=nav_hist_title,
                     subtitle=nav_hist_sub,
@@ -1510,6 +1810,7 @@ def main(page: ft.Page):
 
     page.add(ft.Row([left_sidebar, center_container, right_sidebar], expand=True, spacing=0))
     refresh_recipients()
+    refresh_tracks()
     refresh_history()
 
 
