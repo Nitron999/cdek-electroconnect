@@ -46,7 +46,7 @@ def _fill_after_label(
     if not value:
         return False
 
-    cond = "not(@type='hidden') and not(@disabled) and not(@readonly)" if tag == "input" else "not(@disabled)"
+    cond = "not(@type='hidden') and not(@type='checkbox') and not(@type='radio') and not(@disabled) and not(@readonly)" if tag == "input" else "not(@disabled)"
     xpaths = []
     if section_title:
         for pref in _section_prefix(section_title):
@@ -68,25 +68,80 @@ def _fill_after_label(
     return False
 
 
-def _fill_cargo_description(page: Page, description: str) -> bool:
-    """Надёжно заполняет '* Описание груза' (даже если подпись разбита на две строки)."""
+def _fill_cargo_description(page: Page, description: str, log: Callable[[str], None]) -> bool:
+    """Железобетонно заполняет '* Описание груза' (и input, и textarea) и проверяет ввод."""
     desc = (description or "ПЛАТЫ").strip()
 
-    # 1. Пробуем по слову 'Описание' внутри блока Товары
-    if _fill_after_label(page, "Описание", desc, section_title="Товары", press_tab=True):
-        return True
-
-    # 2. Резерв: берём поле ввода, которое идёт сразу после поля 'Высота'
+    # Способ 1: Находим поле (input или textarea) напрямую в DOM рядом с текстом 'Описание груза'
     try:
-        xp = (
-            "xpath=(//*[contains(normalize-space(.), 'Высота') and not(descendant::input)])[last()]"
-            "/following::input[not(@type='hidden') and not(@disabled) and not(@readonly)][2]"
+        found = page.evaluate(
+            """() => {
+                const all = Array.from(document.querySelectorAll('*'));
+                const labelEl = all.find(el => {
+                    if (el.children.length > 2) return false;
+                    const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    return t.includes('описание') && t.includes('груза');
+                });
+                if (!labelEl) return false;
+
+                let parent = labelEl.parentElement;
+                for (let i = 0; i < 5 && parent; i++) {
+                    const field = parent.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([disabled]), textarea:not([disabled])');
+                    if (field && field.offsetParent !== null) {
+                        field.scrollIntoView({block: 'center'});
+                        field.focus();
+                        field.click();
+                        return true;
+                    }
+                    parent = parent.parentElement;
+                }
+                return false;
+            }"""
         )
-        if _fill_locator(page.locator(xp).first, desc, press_tab=True):
+        if found:
+            page.wait_for_timeout(200)
+            page.keyboard.press("ControlOrMeta+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(desc, delay=35)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(400)
+            log(f"-> Описание груза вписано: {desc}")
             return True
     except Exception:
         pass
 
+    # Способ 2: Переход по Tab из поля «Высота» (пропускаем кнопку очистки ×, пока не попадём в пустое поле)
+    try:
+        for _ in range(5):
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(150)
+            is_target = page.evaluate(
+                """() => {
+                    const el = document.activeElement;
+                    if (!el) return false;
+                    const tag = el.tagName;
+                    if (tag !== 'INPUT' && tag !== 'TEXTAREA') return false;
+                    const t = (el.type || '').toLowerCase();
+                    if (t === 'checkbox' || t === 'radio' || t === 'button') return false;
+                    return (el.value || '').trim() === '';
+                }"""
+            )
+            if is_target:
+                page.keyboard.type(desc, delay=35)
+                page.keyboard.press("Tab")
+                page.wait_for_timeout(400)
+                log(f"-> Описание груза вписано (через Tab): {desc}")
+                return True
+    except Exception:
+        pass
+
+    # Способ 3: XPath для input и textarea
+    for tag in ("input", "textarea"):
+        if _fill_after_label(page, "Описание", desc, section_title="Товары", tag=tag, press_tab=True):
+            log(f"-> Описание груза вписано ({tag}): {desc}")
+            return True
+
+    log("[ВНИМАНИЕ] Не удалось найти поле «Описание груза»!")
     return False
 
 
@@ -424,21 +479,23 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             _fill_after_label(page, "Длина", order.get("length", "10"), section_title="Товары")
             _fill_after_label(page, "Ширина", order.get("width", "10"), section_title="Товары")
             _fill_after_label(page, "Высота", order.get("height", "5"), section_title="Товары")
-            _fill_cargo_description(page, order.get("description", "ПЛАТЫ"))
+            _fill_cargo_description(page, order.get("description", "ПЛАТЫ"), log)
 
-            # Ждём, пока СДЭК раскроет блок «Тарифы» после заполнения обязательных полей
-            log("-> Жду загрузку тарифов...")
+            # Опускаемся вниз и ждём, пока СДЭК раскроет блок «Тарифы»
+            log("-> Опускаюсь вниз и жду загрузку тарифов...")
+            page.evaluate("window.scrollBy(0, 500)")
             try:
-                page.wait_for_selector("text=КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ", timeout=12000)
+                page.wait_for_selector("text=КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ", timeout=15000)
             except Exception:
                 page.wait_for_timeout(2000)
 
             # --- ШАГ 7: БЛОК «ТАРИФЫ» ---
-            log("8. Выбираю тариф...")
-            _click_in_section(page, "Тарифы", order.get("pickup_from", "КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ"))
-            _click_in_section(page, "Тарифы", order.get("delivery_to", "В ПВЗ"))
-            page.wait_for_timeout(2000)
-            _click_in_section(page, "Тарифы", order.get("tariff", "Экспресс дверь-склад"), timeout=4000)
+            log("8. Выбираю тариф (Курьер заберёт по адресу -> В ПВЗ -> Экспресс дверь-склад)...")
+            _safe_click_text(page, order.get("pickup_from", "КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ"), timeout=4000)
+            page.wait_for_timeout(400)
+            _safe_click_text(page, order.get("delivery_to", "В ПВЗ"), timeout=4000)
+            page.wait_for_timeout(2200)
+            _safe_click_text(page, order.get("tariff", "Экспресс дверь-склад"), timeout=5000)
             page.wait_for_timeout(1200)
 
             # --- ШАГ 8: ДОПОЛНИТЕЛЬНЫЕ УСЛУГИ ---
