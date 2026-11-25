@@ -12,12 +12,12 @@ CDEK_URL = "https://lk.cdek.ru/"
 def _section_prefix(section_title: str) -> list[str]:
     """Возвращает XPath-префиксы заголовка секции (минуя левое меню навигации)."""
     return [
-        f"//*[self::h1 or self::h2 or self::h3 or self::h4][normalize-space(text())='{section_title}']",
-        f"(//*[normalize-space(text())='{section_title}'])[last()]",
+        f"//*[self::h1 or self::h2 or self::h3 or self::h4][normalize-space(.)='{section_title}']",
+        f"(//*[normalize-space(.)='{section_title}'])[last()]",
     ]
 
 
-def _fill_locator(loc, value: str, clear: bool = True) -> bool:
+def _fill_locator(loc, value: str, clear: bool = True, press_tab: bool = False) -> bool:
     try:
         loc.scroll_into_view_if_needed(timeout=2000)
         if not loc.is_visible(timeout=1500):
@@ -27,6 +27,8 @@ def _fill_locator(loc, value: str, clear: bool = True) -> bool:
             loc.press("ControlOrMeta+A")
             loc.press("Backspace")
         loc.fill(str(value))
+        if press_tab:
+            loc.press("Tab")
         return True
     except Exception:
         return False
@@ -38,8 +40,9 @@ def _fill_after_label(
     value: str,
     section_title: str | None = None,
     tag: str = "input",
+    press_tab: bool = False,
 ) -> bool:
-    """Находит первое активное поле ввода строго после подписи field_text (внутри указанной секции)."""
+    """Находит первое активное поле ввода строго после подписи field_text (с учётом переносов строк)."""
     if not value:
         return False
 
@@ -47,13 +50,43 @@ def _fill_after_label(
     xpaths = []
     if section_title:
         for pref in _section_prefix(section_title):
-            xpaths.append(f"xpath={pref}/following::*[contains(text(), '{field_text}')][1]/following::{tag}[{cond}][1]")
+            xpaths.append(
+                f"xpath={pref}/following::*[contains(normalize-space(.), '{field_text}') and not(descendant::input)][1]/following::{tag}[{cond}][1]"
+            )
+            xpaths.append(
+                f"xpath={pref}/following::*[contains(text(), '{field_text}')][1]/following::{tag}[{cond}][1]"
+            )
     else:
+        xpaths.append(
+            f"xpath=//*[contains(normalize-space(.), '{field_text}') and not(descendant::input)][1]/following::{tag}[{cond}][1]"
+        )
         xpaths.append(f"xpath=//*[contains(text(), '{field_text}')][1]/following::{tag}[{cond}][1]")
 
     for xp in xpaths:
-        if _fill_locator(page.locator(xp).first, value):
+        if _fill_locator(page.locator(xp).first, value, press_tab=press_tab):
             return True
+    return False
+
+
+def _fill_cargo_description(page: Page, description: str) -> bool:
+    """Надёжно заполняет '* Описание груза' (даже если подпись разбита на две строки)."""
+    desc = (description or "ПЛАТЫ").strip()
+
+    # 1. Пробуем по слову 'Описание' внутри блока Товары
+    if _fill_after_label(page, "Описание", desc, section_title="Товары", press_tab=True):
+        return True
+
+    # 2. Резерв: берём поле ввода, которое идёт сразу после поля 'Высота'
+    try:
+        xp = (
+            "xpath=(//*[contains(normalize-space(.), 'Высота') and not(descendant::input)])[last()]"
+            "/following::input[not(@type='hidden') and not(@disabled) and not(@readonly)][2]"
+        )
+        if _fill_locator(page.locator(xp).first, desc, press_tab=True):
+            return True
+    except Exception:
+        pass
+
     return False
 
 
@@ -97,7 +130,7 @@ def _click_in_section(page: Page, section_title: str, button_text: str, timeout:
     if not button_text:
         return False
     for pref in _section_prefix(section_title):
-        xp = f"xpath={pref}/following::*[contains(normalize-space(text()), '{button_text}')][1]"
+        xp = f"xpath={pref}/following::*[contains(normalize-space(.), '{button_text}') and not(descendant::*[contains(normalize-space(.), '{button_text}')])][1]"
         try:
             loc = page.locator(xp).first
             loc.scroll_into_view_if_needed(timeout=1500)
@@ -191,12 +224,15 @@ def _wait_for_cabinet_loaded(page: Page, log: Callable[[str], None], timeout_sec
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         url = (page.url or "").lower()
-        # Если уже попали в кабинет (order-history или любая страница после login/auth)
-        if "order-history" in url or ("lk.cdek.ru" in url and "login" not in url and "auth" not in url and url.rstrip("/") != "https://lk.cdek.ru"):
+        if "order-history" in url or (
+            "lk.cdek.ru" in url
+            and "login" not in url
+            and "auth" not in url
+            and url.rstrip("/") != "https://lk.cdek.ru"
+        ):
             _dismiss_popups(page, log, wait_sec=3.5)
             return True
 
-        # Если на странице уже появился заголовок кабинета или модалка «ХОРОШО»
         if _dismiss_popups_once(page, log):
             return True
 
@@ -382,14 +418,20 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             if order.get("recipient_email"):
                 _fill_after_label(page, "Электронная почта", order["recipient_email"], section_title="Получатель")
 
-            # --- ШАГ 6: БЛОК «ТОВАРЫ» (Вес, Длина, Ширина, Высота, Описание груза) ---
+            # --- ШАГ 6: БЛОК «ТОВАРЫ» (Вес, Длина, Ширина, Высота, Описание груза = ПЛАТЫ) ---
             log("7. Заполняю товары (вес, габариты, описание груза)...")
             _fill_after_label(page, "Вес", order.get("weight", "0.5"), section_title="Товары")
             _fill_after_label(page, "Длина", order.get("length", "10"), section_title="Товары")
             _fill_after_label(page, "Ширина", order.get("width", "10"), section_title="Товары")
             _fill_after_label(page, "Высота", order.get("height", "5"), section_title="Товары")
-            _fill_after_label(page, "Описание груза", order.get("description", "ПЛАТЫ"), section_title="Товары")
-            page.wait_for_timeout(1000)
+            _fill_cargo_description(page, order.get("description", "ПЛАТЫ"))
+
+            # Ждём, пока СДЭК раскроет блок «Тарифы» после заполнения обязательных полей
+            log("-> Жду загрузку тарифов...")
+            try:
+                page.wait_for_selector("text=КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ", timeout=12000)
+            except Exception:
+                page.wait_for_timeout(2000)
 
             # --- ШАГ 7: БЛОК «ТАРИФЫ» ---
             log("8. Выбираю тариф...")
@@ -397,13 +439,13 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             _click_in_section(page, "Тарифы", order.get("delivery_to", "В ПВЗ"))
             page.wait_for_timeout(2000)
             _click_in_section(page, "Тарифы", order.get("tariff", "Экспресс дверь-склад"), timeout=4000)
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(1200)
 
             # --- ШАГ 8: ДОПОЛНИТЕЛЬНЫЕ УСЛУГИ ---
             if order.get("use_insurance") and order.get("declared_value"):
                 log("9. Указываю объявленную стоимость...")
                 _click_in_section(page, "Дополнительные услуги", "Дополнительный сбор за объявленную стоимость")
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(500)
                 _fill_after_label(
                     page,
                     "объявленная стоимость",
@@ -431,6 +473,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 "Дата и время забора",
                 order.get("pickup_date", ""),
                 section_title="Информация об отправлении",
+                press_tab=True,
             )
             if order.get("time_from"):
                 _click_in_section(page, "Информация об отправлении", order["time_from"], timeout=1500)
