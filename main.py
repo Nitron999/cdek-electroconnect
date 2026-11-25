@@ -1,4 +1,5 @@
 import datetime
+import re
 import threading
 import flet as ft
 from storage import load_recipients, save_recipients, load_history
@@ -36,12 +37,14 @@ def main(page: ft.Page):
         max_lines: int = 1,
         hint_text: str | None = None,
         prefix_icon=None,
+        suffix=None,
     ) -> ft.TextField:
         return ft.TextField(
             label=label,
             value=value,
             hint_text=hint_text,
             prefix_icon=prefix_icon,
+            suffix=suffix,
             password=password,
             can_reveal_password=can_reveal_password,
             multiline=multiline,
@@ -199,20 +202,32 @@ def main(page: ft.Page):
     # Выбор ПВЗ / постамата / адреса доставки
     tf_pvz_code = styled_tf("Код ПВЗ", "IZHV16", accent=C_SHIP, width=130)
     tf_pvz_address = styled_tf("Адрес ПВЗ / постамата (или адрес доставки)", "ул. Азина, 135", accent=C_SHIP, expand=True)
+
+    def clear_pvz_filter(_=None):
+        tf_pvz_search.value = ""
+        render_pvz_list()
+
     tf_pvz_search = styled_tf(
         label="Фильтр списка ПВЗ",
-        hint_text="Введи улицу или код ПВЗ...",
+        hint_text="Введи улицу, номер дома или код ПВЗ...",
         prefix_icon=ft.icons.SEARCH,
+        suffix=ft.IconButton(
+            icon=ft.icons.CLOSE,
+            icon_size=16,
+            icon_color="#94a3b8",
+            tooltip="Очистить фильтр",
+            on_click=clear_pvz_filter,
+        ),
         accent=C_SHIP,
         expand=True,
     )
     dd_pvz_type_filter = styled_dd("Тип пункта", "Все", ["Все", "Пункт выдачи", "Постамат"], accent=C_SHIP, width=165)
     pvz_status_text = ft.Text(
-        "Нажми «Загрузить ПВЗ», чтобы подтянуть пункты выдачи из интернета.",
+        "Нажми «Загрузить ПВЗ из интернета», чтобы подтянуть пункты выдачи для выбранного города.",
         size=12,
         color="#94a3b8",
     )
-    pvz_list_view = ft.ListView(height=150, spacing=5)
+    pvz_list_view = ft.ListView(height=270, spacing=6)
 
     # --- 5. КОММЕНТАРИЙ К ЗАКАЗУ ---
     tf_order_comment = styled_tf(
@@ -258,48 +273,94 @@ def main(page: ft.Page):
         add_log(f"Выбран пункт: {item.get('code')} — {item.get('address')}")
         page.update()
 
+    def _norm_search_text(text: str) -> str:
+        return re.sub(r"[^a-zа-я0-9]+", " ", (text or "").lower().replace("ё", "е")).strip()
+
     def render_pvz_list(_=None):
-        query = (tf_pvz_search.value or "").strip().lower()
+        raw_query = _norm_search_text(tf_pvz_search.value or "")
+        tokens = [t for t in raw_query.split() if t not in ("ул", "улица", "д", "дом", "пр", "проспект", "пр-т", "мкр", "корп", "к")]
         t_filter = dd_pvz_type_filter.value
         pvz_list_view.controls.clear()
 
+        matched_count = 0
         for item in loaded_pvz:
             if t_filter != "Все" and item.get("type") != t_filter:
                 continue
-            haystack = f"{item.get('code', '')} {item.get('address', '')}".lower()
-            if query and query not in haystack:
+            haystack = _norm_search_text(f"{item.get('code', '')} {item.get('address', '')} {item.get('city', '')}")
+            if tokens and not all(tok in haystack for tok in tokens):
                 continue
 
+            matched_count += 1
             is_postamat = item.get("type") == "Постамат"
             badge_color = "#38bdf8" if is_postamat else "#34d399"
+            badge_bg = "#0c2438" if is_postamat else "#0d2922"
 
             pvz_list_view.controls.append(
                 ft.Container(
                     bgcolor="#161f30",
-                    border=ft.border.all(1, "#26334a"),
-                    border_radius=8,
-                    padding=ft.padding.symmetric(horizontal=10, vertical=7),
+                    border=ft.border.all(1, "#2a3952"),
+                    border_radius=9,
+                    padding=ft.padding.symmetric(horizontal=12, vertical=9),
                     on_click=lambda e, it=item: select_pvz(it),
                     content=ft.Row(
                         [
-                            ft.Container(width=9, height=9, border_radius=5, bgcolor=badge_color),
+                            ft.Container(width=10, height=10, border_radius=5, bgcolor=badge_color),
                             ft.Column(
                                 [
                                     ft.Row(
                                         [
-                                            ft.Text(item.get("code", ""), size=12, weight=ft.FontWeight.BOLD, color="#ffffff"),
-                                            ft.Text(f"• {item.get('type', '')}", size=11, color=badge_color),
+                                            ft.Container(
+                                                bgcolor=badge_bg,
+                                                border=ft.border.all(1, badge_color),
+                                                border_radius=5,
+                                                padding=ft.padding.symmetric(horizontal=7, vertical=2),
+                                                content=ft.Text(
+                                                    item.get("code", "") or "ПВЗ",
+                                                    size=12,
+                                                    weight=ft.FontWeight.BOLD,
+                                                    color=badge_color,
+                                                ),
+                                            ),
+                                            ft.Text(
+                                                item.get("type", ""),
+                                                size=12,
+                                                weight=ft.FontWeight.W_600,
+                                                color=badge_color,
+                                            ),
+                                            ft.Text(
+                                                f"• {item.get('work_time', '')}" if item.get("work_time") else "",
+                                                size=11,
+                                                color="#94a3b8",
+                                            ),
                                         ],
-                                        spacing=6,
+                                        spacing=8,
+                                        wrap=True,
                                     ),
-                                    ft.Text(item.get("address", ""), size=12, color="#e2e8f0"),
-                                    ft.Text(item.get("work_time", ""), size=10, color="#94a3b8"),
+                                    ft.Text(
+                                        item.get("address", ""),
+                                        size=15,
+                                        weight=ft.FontWeight.BOLD,
+                                        color="#fde047",
+                                    ),
                                 ],
-                                spacing=1,
+                                spacing=4,
                                 expand=True,
                             ),
-                            ft.Icon(ft.icons.CHECK_CIRCLE_OUTLINE, size=18, color=badge_color),
-                        ]
+                            ft.Icon(ft.icons.CHECK_CIRCLE_OUTLINE, size=20, color=badge_color),
+                        ],
+                        spacing=10,
+                    ),
+                )
+            )
+
+        if loaded_pvz and matched_count == 0:
+            pvz_list_view.controls.append(
+                ft.Container(
+                    padding=12,
+                    content=ft.Text(
+                        "По фильтру ничего не найдено — нажми × в строке фильтра, чтобы показать все пункты города.",
+                        size=13,
+                        color="#fbbf24",
                     ),
                 )
             )
@@ -317,6 +378,9 @@ def main(page: ft.Page):
     )
 
     def on_load_pvz_click(_):
+        # Сбрасываем старый фильтр перед загрузкой нового города
+        tf_pvz_search.value = ""
+        dd_pvz_type_filter.value = "Все"
         btn_load_pvz.disabled = True
         pvz_status_text.value = f"Загружаю пункты выдачи для «{tf_city_to.value}»..."
         page.update()
@@ -345,6 +409,7 @@ def main(page: ft.Page):
     recipients_list = ft.ListView(expand=True, spacing=6)
 
     def apply_recipient(item: dict):
+        nonlocal loaded_pvz
         dd_rec_type.value = item.get("recipient_type", "ФИЗ. ЛИЦО")
         tf_rec_fio.value = item.get("name", "")
         tf_rec_phone.value = item.get("phone", "")
@@ -358,6 +423,14 @@ def main(page: ft.Page):
             dd_tariff.value = tariff
         else:
             dd_tariff.value = "Экспресс дверь-склад"
+
+        # Сбрасываем старый фильтр и список ПВЗ прошлого города, чтобы не мешали
+        tf_pvz_search.value = ""
+        dd_pvz_type_filter.value = "Все"
+        loaded_pvz = []
+        pvz_list_view.controls.clear()
+        pvz_status_text.value = f"Выбран город «{item.get('city_to', '')}». Нажми «Загрузить ПВЗ из интернета», если нужно сменить пункт."
+
         add_log(f"Загружен получатель: {item.get('name')}")
         page.update()
 
@@ -432,12 +505,16 @@ def main(page: ft.Page):
             add_log(f"Сохранено в справочник: {name}")
 
     def clear_recipient_fields(_):
+        nonlocal loaded_pvz
         tf_rec_fio.value = ""
         tf_rec_phone.value = ""
         tf_rec_email.value = ""
         tf_city_to.value = ""
         tf_pvz_code.value = ""
         tf_pvz_address.value = ""
+        tf_pvz_search.value = ""
+        loaded_pvz = []
+        pvz_list_view.controls.clear()
         add_log("Поля получателя очищены — можно вводить нового клиента.")
         page.update()
 
@@ -464,7 +541,6 @@ def main(page: ft.Page):
     )
 
     def on_run_click(_):
-        # Автоматически сохраняем нового получателя в базу, если включена галочка
         rec_name = tf_rec_fio.value.strip()
         if cb_auto_save.value and rec_name:
             exists = any(r.get("name", "").strip().lower() == rec_name.lower() for r in recipients)
@@ -681,7 +757,7 @@ def main(page: ft.Page):
                     ft.Container(
                         bgcolor="#0b101b",
                         border_radius=8,
-                        padding=6,
+                        padding=8,
                         border=ft.border.all(1, "#26334a"),
                         content=pvz_list_view,
                     ),
