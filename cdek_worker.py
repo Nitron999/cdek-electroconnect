@@ -242,7 +242,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                     "label:has-text('Адрес') >> .. >> input",
                     "input[placeholder*='Адрес' i]",
                 ],
-                order.get("pickup_address", "Шоссейная 21, офис 426"),
+                order.get("pickup_address", "Сущёвская, 21, офис 426"),
             )
             if order.get("courier_comment"):
                 _safe_fill(
@@ -269,7 +269,6 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             pvz_query = (order.get("pvz_code") or order.get("pvz_address") or "").strip()
             if pvz_query and order.get("delivery_to") in ("В ПВЗ", "В ПОСТАМАТ"):
                 log(f"11. Выбираю ПВЗ/постамат: {pvz_query}...")
-                # Если ПВЗ уже выбран из шаблона — жмём ИЗМЕНИТЬ
                 _safe_click_text(page, "ИЗМЕНИТЬ", timeout=1500)
                 page.wait_for_timeout(800)
 
@@ -282,7 +281,6 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                     pvz_query,
                 ):
                     page.wait_for_timeout(1500)
-                    # Кликаем по найденному пункту в списке слева от карты
                     if not _safe_click_text(page, pvz_query, timeout=3000):
                         if order.get("pvz_address"):
                             _safe_click_text(page, order["pvz_address"], timeout=3000)
