@@ -15,7 +15,7 @@ def main(page: ft.Page):
     page.window.width = 1380
     page.window.height = 880
     page.window.min_width = 1120
-    page.window.min_height = 720
+    page.window.min_height = 700
 
     recipients = load_recipients()
     loaded_pvz: list[dict] = []
@@ -109,7 +109,7 @@ def main(page: ft.Page):
     cb_insurance = ft.Checkbox(label="Дополнительный сбор за объявленную стоимость", value=True)
     tf_declared = ft.TextField(label="Объявленная стоимость, ₽", value="3000", dense=True, width=200)
 
-    # 6. Информация об отправлении (забор курьером + ПВЗ/постамат + комментарий)
+    # 6. Информация об отправлении
     tf_pickup_address = ft.TextField(
         label="Адрес забора курьером",
         value="Сущёвская, 21, офис 426",
@@ -141,7 +141,7 @@ def main(page: ft.Page):
         width=160,
     )
     pvz_status_text = ft.Text("Нажми «Загрузить ПВЗ», чтобы подтянуть пункты выдачи из интернета.", size=12, color="#94a3b8")
-    pvz_list_view = ft.ListView(height=160, spacing=5)
+    pvz_list_view = ft.ListView(height=150, spacing=5)
 
     # Комментарий к заказу (УПД по умолчанию, можно редактировать)
     tf_order_comment = ft.TextField(
@@ -153,7 +153,7 @@ def main(page: ft.Page):
         dense=True,
     )
 
-    log_view = ft.ListView(height=110, spacing=3, auto_scroll=True)
+    log_view = ft.ListView(height=72, spacing=2, auto_scroll=True)
 
     def add_log(msg: str):
         log_view.controls.append(ft.Text(msg, size=12, color="#94a3b8"))
@@ -203,12 +203,7 @@ def main(page: ft.Page):
                     on_click=lambda e, it=item: select_pvz(it),
                     content=ft.Row(
                         [
-                            ft.Container(
-                                width=9,
-                                height=9,
-                                border_radius=5,
-                                bgcolor=badge_color,
-                            ),
+                            ft.Container(width=9, height=9, border_radius=5, bgcolor=badge_color),
                             ft.Column(
                                 [
                                     ft.Row(
@@ -350,13 +345,13 @@ def main(page: ft.Page):
     tf_search.on_change = refresh_recipients
     recipients_header = ft.Text(f"Справочник получателей ({len(recipients)})", size=15, weight=ft.FontWeight.BOLD)
 
-    # --- КНОПКА «СОЗДАТЬ ЗАКАЗ» ---
+    # --- ЗАКРЕПЛЁННАЯ КНОПКА «СОЗДАТЬ ЗАКАЗ» ---
     btn_run = ft.ElevatedButton(
-        text="СОЗДАТЬ ЗАКАЗ",
+        text="СОЗДАТЬ ЗАКАЗ И РАСПЕЧАТАТЬ НАКЛАДНУЮ",
         icon=ft.icons.LOCAL_SHIPPING,
         bgcolor="#10b981",
         color="#0f141e",
-        height=50,
+        height=52,
         style=ft.ButtonStyle(
             shape=ft.RoundedRectangleBorder(radius=10),
             text_style=ft.TextStyle(weight=ft.FontWeight.BOLD, size=15),
@@ -414,7 +409,7 @@ def main(page: ft.Page):
                 add_log(f"[ОШИБКА]: {exc}")
             finally:
                 btn_run.disabled = False
-                btn_run.text = "СОЗДАТЬ ЗАКАЗ"
+                btn_run.text = "СОЗДАТЬ ЗАКАЗ И РАСПЕЧАТАТЬ НАКЛАДНУЮ"
                 refresh_history()
                 page.update()
 
@@ -434,8 +429,8 @@ def main(page: ft.Page):
             ),
         )
 
-    # --- ВКЛАДКА 1: ОФОРМЛЕНИЕ ---
-    order_tab = ft.Column(
+    # --- ВКЛАДКА 1: ОФОРМЛЕНИЕ (прокручиваемая форма + закреплённая кнопка снизу) ---
+    scrollable_form = ft.Column(
         scroll=ft.ScrollMode.AUTO,
         expand=True,
         spacing=12,
@@ -516,19 +511,35 @@ def main(page: ft.Page):
                 ],
             ),
             section_card(
-                "5. Комментарий к заказу и запуск",
-                [
-                    tf_order_comment,
-                    ft.Row([btn_run]),
-                    ft.Container(
-                        bgcolor="#0b0f17",
-                        border_radius=8,
-                        padding=8,
-                        content=log_view,
-                    ),
-                ],
+                "5. Комментарий к заказу",
+                [tf_order_comment],
             ),
         ],
+    )
+
+    pinned_footer = ft.Container(
+        bgcolor="#131926",
+        border_radius=12,
+        padding=12,
+        border=ft.border.all(1, "#232e42"),
+        content=ft.Column(
+            [
+                ft.Row([btn_run]),
+                ft.Container(
+                    bgcolor="#0b0f17",
+                    border_radius=8,
+                    padding=6,
+                    content=log_view,
+                ),
+            ],
+            spacing=8,
+        ),
+    )
+
+    order_tab = ft.Column(
+        expand=True,
+        spacing=10,
+        controls=[scrollable_form, pinned_footer],
     )
 
     # --- ВКЛАДКА 2: ИСТОРИЯ ---
@@ -573,7 +584,7 @@ def main(page: ft.Page):
         ],
     )
 
-    center_container = ft.Container(expand=True, padding=16, content=order_tab)
+    center_container = ft.Container(expand=True, padding=14, content=order_tab)
 
     def show_order(_):
         center_container.content = order_tab
