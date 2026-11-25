@@ -37,12 +37,11 @@ def _resolve_pickup_slot(
 
     start_m = _to_min(time_from, 12 * 60)
     end_m = _to_min(time_to, 15 * 60)
-    duration = max(180, end_m - start_m)  # минимальный интервал СДЭК — 3 часа
+    duration = max(180, end_m - start_m)
 
     if target_date == today:
         now_m = now.hour * 60 + now.minute
         if now_m >= start_m:
-            # 12:00 / 12:01 -> 12:30; 12:30 / 12:31 -> 13:00
             next_start = ((now_m // 30) + 1) * 30
             next_end = next_start + duration
             if next_end > 21 * 60:
@@ -201,7 +200,7 @@ def _fill_cargo_description(page: Page, description: str, log: Callable[[str], N
 
 
 def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> bool:
-    """Заполняет 'Дополнительный сбор за объявленную стоимость' (подпись 'объявленная стоимость' находится ПОД полем)."""
+    """Заполняет 'Дополнительный сбор за объявленную стоимость'."""
     val = str(value or "").strip()
     if not val:
         return False
@@ -260,13 +259,11 @@ def _fill_declared_value(page: Page, value: str, log: Callable[[str], None]) -> 
 
 
 def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[[str], None]) -> None:
-    """Открывает выпадающие поля времени забора (с / до) и выбирает нужные часы (даже если это div/readonly)."""
+    """Открывает выпадающие поля времени забора (с / до) и выбирает нужные часы."""
     if not time_from and not time_to:
         return
 
     def _open_time_slot(slot_idx: int) -> bool:
-        # Ищем 0-й (время 'с', обычно '09:00') или 1-й (время 'до', обычно '18:00') элемент формата ЧЧ:ММ
-        # внутри блока 'Дата и время забора'
         try:
             opened = page.evaluate(
                 """(idx) => {
@@ -281,7 +278,6 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
                     let box = labelEl.parentElement;
                     for (let i = 0; i < 6 && box; i++) {
                         const candidates = [];
-                        // 1. Сначала ищем input с значением ЧЧ:ММ
                         for (const inp of box.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])')) {
                             if (inp.offsetParent === null) continue;
                             const v = (inp.value || inp.placeholder || '').trim();
@@ -289,7 +285,6 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
                                 candidates.push(inp);
                             }
                         }
-                        // 2. Если это кастомный дропдаун (div/span/button с текстом ЧЧ:ММ)
                         if (candidates.length < 2) {
                             for (const el of box.querySelectorAll('button, div, span')) {
                                 if (el.offsetParent === null || el.children.length > 1) continue;
@@ -316,12 +311,10 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
 
     def _choose_option(target_time: str) -> bool:
         page.wait_for_timeout(600)
-        # 1. Ищем видимый пункт выпадающего списка с точным временем (например '12:00' или '15:00')
         try:
             clicked = page.evaluate(
                 """(target) => {
                     const els = Array.from(document.querySelectorAll('li, [role="option"], [class*="option" i], [class*="item" i], div, span, button'));
-                    // Берём с конца, т.к. открытый поповер/дропдаун обычно рендерится в конце DOM
                     for (let i = els.length - 1; i >= 0; i--) {
                         const el = els[i];
                         if (el.offsetParent === null || el.children.length > 1) continue;
@@ -342,7 +335,6 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
         except Exception:
             pass
 
-        # 2. Резерв через Playwright get_by_text
         try:
             opt = page.get_by_text(target_time, exact=True).last
             if opt.is_visible(timeout=1200):
@@ -385,7 +377,7 @@ def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callab
     ).strip()
     query = code if code else short_addr
 
-    log(f"11. Выбираю ПВЗ/постамат: {query}...")
+    log(f"11. Выбираю ПВЗ: {query}...")
 
     search_selectors = [
         "input[placeholder*='Поиск по ПВЗ' i]",
@@ -408,7 +400,6 @@ def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callab
                 continue
         return None
 
-    # 1. Проверяем, не открыто ли поле поиска ПВЗ уже на странице; если нет — жмём «ИЗМЕНИТЬ» / «ВЫБРАТЬ»
     pvz_inp = _find_visible_search_input()
     if pvz_inp is None:
         for sel in (
@@ -428,10 +419,9 @@ def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callab
         pvz_inp = _find_visible_search_input()
 
     if pvz_inp is None:
-        log("[ВНИМАНИЕ] Поле поиска ПВЗ/постамата в СДЭК не найдено.")
+        log("[ВНИМАНИЕ] Поле поиска ПВЗ в СДЭК не найдено.")
         return False
 
-    # 2. Вводим код или улицу+дом в поле поиска ПВЗ
     try:
         pvz_inp.scroll_into_view_if_needed(timeout=2000)
         pvz_inp.click()
@@ -444,7 +434,6 @@ def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callab
 
     page.wait_for_timeout(1800)
 
-    # 3. Кликаем по найденному пункту в списке/карте
     candidates = [c for c in (code, addr, short_addr) if c]
     if short_addr:
         first_part = short_addr.split(",")[0].strip()
@@ -481,7 +470,6 @@ def _select_pvz_on_cdek(page: Page, pvz_code: str, pvz_address: str, log: Callab
 
     page.wait_for_timeout(1000)
 
-    # 4. Нажимаем «ВЫБРАТЬ» / «Выбрать» если появилась кнопка подтверждения
     for btn_text in ("ВЫБРАТЬ", "Выбрать", "Выбрать пункт"):
         try:
             btn = page.get_by_role("button", name=btn_text, exact=False).last
@@ -562,6 +550,136 @@ def _fill_order_comment(page: Page, comment: str, log: Callable[[str], None]) ->
 
     log("[ВНИМАНИЕ] Не удалось вписать комментарий к заказу!")
     return False
+
+
+def _download_waybill_from_order_list(page: Page, context, copies: int, log: Callable[[str], None]) -> str | None:
+    """
+    Переходит в Список заказов -> три точки у самого верхнего заказа ->
+    Распечатать документы -> Накладная (3 копии) -> РАСПЕЧАТАТЬ ->
+    перехватывает PDF из открывшейся вкладки и сохраняет на диск для SumatraPDF.
+    """
+    log("14. Перехожу в «Список заказов» для печати накладной (3 копии)...")
+    try:
+        page.goto("https://lk.cdek.ru/order-history", wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        _safe_click_text(page, "Список заказов", timeout=4000)
+
+    page.wait_for_timeout(2500)
+    _dismiss_popups_once(page, log)
+
+    # Ждём появления таблицы заказов
+    try:
+        page.wait_for_selector("text=Создан", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1200)
+
+    # 1. Нажимаем на иконку «три точки» в первой (верхней) строке заказа
+    log("-> Нажимаю три точки у последнего созданного заказа...")
+    clicked_dots = False
+    try:
+        clicked_dots = bool(
+            page.evaluate(
+                """() => {
+                    // Ищем первую строку таблицы заказов (tr или контейнер строки с номером заказа)
+                    const rows = Array.from(document.querySelectorAll('tbody tr, [class*="order-row" i], [class*="table-row" i]'))
+                        .filter(r => r.offsetParent !== null && /\\d{8,}/.test(r.innerText || ''));
+                    if (rows.length > 0) {
+                        const row = rows[0];
+                        // Берём самую правую кликабельную кнопку/иконку в строке (три точки)
+                        const btns = Array.from(row.querySelectorAll('button, [role="button"], svg, [class*="menu" i], [class*="more" i], [class*="dots" i]'))
+                            .filter(el => el.offsetParent !== null);
+                        if (btns.length > 0) {
+                            let rightmost = btns[0];
+                            let maxRight = rightmost.getBoundingClientRect().right;
+                            for (const b of btns) {
+                                const r = b.getBoundingClientRect().right;
+                                if (r >= maxRight) {
+                                    maxRight = r;
+                                    rightmost = b;
+                                }
+                            }
+                            rightmost.scrollIntoView({block: 'center'});
+                            rightmost.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }"""
+            )
+        )
+    except Exception:
+        clicked_dots = False
+
+    if not clicked_dots:
+        log("[ВНИМАНИЕ] Не удалось автоматически нажать три точки у заказа.")
+        return None
+
+    page.wait_for_timeout(800)
+
+    # 2. В выпадающем меню жмём «Распечатать документы»
+    log("-> Выбираю «Распечатать документы»...")
+    if not _safe_click_text(page, "Распечатать документы", timeout=4000):
+        log("[ВНИМАНИЕ] Пункт «Распечатать документы» не найден.")
+        return None
+
+    page.wait_for_timeout(1200)
+
+    # 3. Убеждаемся, что выбрана «Накладная», и ставим Количество копий = 3
+    log(f"-> Выставляю «Накладная» — количество копий: {copies}...")
+    _safe_click_text(page, "Накладная", timeout=2000)
+    page.wait_for_timeout(300)
+
+    if not _fill_after_label(page, "Количество копий", str(copies), press_tab=True):
+        try:
+            inp = page.locator("input[type='number'], [role='dialog'] input, .modal input").first
+            _fill_locator(inp, str(copies), press_tab=True)
+        except Exception:
+            pass
+
+    page.wait_for_timeout(400)
+
+    # 4. Нажимаем «РАСПЕЧАТАТЬ» и ловим новую вкладку с PDF (lk.cdek.ru/print/print-order?...)
+    log("-> Нажимаю «РАСПЕЧАТАТЬ» и перехватываю PDF...")
+    pdf_url = None
+    new_page = None
+    try:
+        with context.expect_page(timeout=25000) as new_page_info:
+            if not _safe_click_text(page, "РАСПЕЧАТАТЬ", timeout=4000, exact=True):
+                _safe_click_text(page, "Распечатать", timeout=4000)
+        new_page = new_page_info.value
+        new_page.wait_for_load_state("domcontentloaded", timeout=20000)
+        page.wait_for_timeout(1000)
+        pdf_url = new_page.url
+    except Exception as e:
+        log(f"[ВНИМАНИЕ] Новая вкладка с PDF не открылась: {e}")
+        return None
+
+    if not pdf_url:
+        return None
+
+    # 5. Скачиваем PDF напрямую через сессию браузера (с куками) и сохраняем в DOWNLOADS_DIR
+    try:
+        resp = context.request.get(pdf_url, timeout=30000)
+        if resp.ok:
+            body = resp.body()
+            filename = f"cdek_waybill_{int(time.time())}.pdf"
+            pdf_path = os.path.join(DOWNLOADS_DIR, filename)
+            with open(pdf_path, "wb") as f:
+                f.write(body)
+            log(f"-> PDF накладной ({copies} коп.) сохранён: {filename}")
+            try:
+                if new_page:
+                    new_page.close()
+            except Exception:
+                pass
+            return pdf_path
+        else:
+            log(f"[ВНИМАНИЕ] Не удалось скачать PDF (код {resp.status}).")
+    except Exception as e:
+        log(f"[ВНИМАНИЕ] Ошибка скачивания PDF: {e}")
+
+    return None
 
 
 def _fill_phone_in_section(page: Page, section_title: str, phone: str) -> bool:
@@ -762,11 +880,10 @@ def _fill_city_field(page: Page, field_label: str, city_value: str, use_moscow_q
 
 
 def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
-    """Всегда создаёт новый заказ в lk.cdek.ru с нуля, заполняет все поля по секциям и печатает через SumatraPDF."""
+    """Создаёт новый заказ в lk.cdek.ru, заполняет все поля и печатает 3 копии накладной через SumatraPDF."""
     login = order.get("login", "").strip()
     password = order.get("password", "").strip()
 
-    # Вычисляем актуальную дату и время забора с учётом автосдвига на 30 минут
     pickup_date, time_from, time_to = _resolve_pickup_slot(
         order.get("pickup_date", ""),
         order.get("time_from", "12:00"),
@@ -775,11 +892,12 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
     )
 
     with sync_playwright() as p:
-        log("1. Запускаю браузер...")
+        log("1. Запускаю браузер (геолокация отключена)...")
         launch_args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-infobars",
             "--no-sandbox",
+            "--deny-permission-prompts",
         ]
         try:
             browser = p.chromium.launch(
@@ -798,6 +916,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
         context = browser.new_context(
             viewport={"width": 1366, "height": 860},
             accept_downloads=True,
+            permissions=[],
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -810,7 +929,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
         page = context.new_page()
 
         try:
-            # --- ШАГ 1: ВХОД (зелёная кнопка ВОЙТИ) ---
+            # --- ШАГ 1: ВХОД ---
             log("2. Открываю lk.cdek.ru и ввожу логин/пароль...")
             page.goto(CDEK_URL, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(1500)
@@ -835,7 +954,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             if not _wait_for_cabinet_loaded(page, log, timeout_sec=180):
                 raise RuntimeError("Не удалось дождаться входа в личный кабинет СДЭК.")
 
-            # --- ШАГ 2: КЛИК «Новый заказ» / «НОВЫЙ ЗАКАЗ» ---
+            # --- ШАГ 2: КЛИК «Новый заказ» ---
             log("3. Открываю «Новый заказ»...")
             opened_new_order = False
             for _ in range(4):
@@ -877,16 +996,15 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             page.wait_for_timeout(400)
 
             _fill_city_field(page, "Город отправителя", "Москва", use_moscow_quicklink=True)
-
             if order.get("city_to"):
                 _fill_city_field(page, "Город получателя", order["city_to"], use_moscow_quicklink=False)
 
-            # --- ШАГ 4: БЛОК «ОТПРАВИТЕЛЬ» (Крылова Людмила Борисовна и её телефон) ---
+            # --- ШАГ 4: БЛОК «ОТПРАВИТЕЛЬ» ---
             log("5. Заполняю контактное лицо отправителя (Крылова)...")
             _fill_after_label(page, "ФИО", order.get("sender_fio", "Крылова Людмила Борисовна"), section_title="Отправитель")
             _fill_phone_in_section(page, "Отправитель", order.get("sender_phone", "+7 916 195 36 94"))
 
-            # --- ШАГ 5: БЛОК «ПОЛУЧАТЕЛЬ» (из базы / программы) ---
+            # --- ШАГ 5: БЛОК «ПОЛУЧАТЕЛЬ» ---
             log("6. Заполняю блок «Получатель»...")
             rec_type = order.get("recipient_type", "ФИЗ. ЛИЦО")
             _click_in_section(page, "Получатель", rec_type)
@@ -900,7 +1018,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             if order.get("recipient_email"):
                 _fill_after_label(page, "Электронная почта", order["recipient_email"], section_title="Получатель")
 
-            # --- ШАГ 6: БЛОК «ТОВАРЫ» (Вес, Длина, Ширина, Высота, Описание груза = ПЛАТЫ) ---
+            # --- ШАГ 6: БЛОК «ТОВАРЫ» ---
             log("7. Заполняю товары (вес, габариты, описание груза)...")
             _fill_after_label(page, "Вес", order.get("weight", "0.5"), section_title="Товары")
             _fill_after_label(page, "Длина", order.get("length", "10"), section_title="Товары")
@@ -908,7 +1026,6 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             _fill_after_label(page, "Высота", order.get("height", "5"), section_title="Товары")
             _fill_cargo_description(page, order.get("description", "ПЛАТЫ"), log)
 
-            # Опускаемся вниз и ждём, пока СДЭК раскроет блок «Тарифы»
             log("-> Опускаюсь вниз и жду загрузку тарифов...")
             page.evaluate("window.scrollBy(0, 500)")
             try:
@@ -916,21 +1033,21 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             except Exception:
                 page.wait_for_timeout(2000)
 
-            # --- ШАГ 7: БЛОК «ТАРИФЫ» ---
+            # --- ШАГ 7: БЛОК «ТАРИФЫ» (ВСЕГДА: КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ -> В ПВЗ) ---
             log("8. Выбираю тариф (Курьер заберёт по адресу -> В ПВЗ -> Экспресс дверь-склад)...")
-            _safe_click_text(page, order.get("pickup_from", "КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ"), timeout=4000)
+            _safe_click_text(page, "КУРЬЕР ЗАБЕРЁТ ПО АДРЕСУ", timeout=4000, exact=True)
             page.wait_for_timeout(400)
-            _safe_click_text(page, order.get("delivery_to", "В ПВЗ"), timeout=4000)
+            _safe_click_text(page, "В ПВЗ", timeout=4000, exact=True)
             page.wait_for_timeout(2200)
             _safe_click_text(page, order.get("tariff", "Экспресс дверь-склад"), timeout=5000)
             page.wait_for_timeout(1200)
 
-            # --- ШАГ 8: ДОПОЛНИТЕЛЬНЫЕ УСЛУГИ (ОБЪЯВЛЕННАЯ СТОИМОСТЬ 3000) ---
+            # --- ШАГ 8: ДОПОЛНИТЕЛЬНЫЕ УСЛУГИ ---
             if order.get("use_insurance") and order.get("declared_value"):
                 log(f"9. Указываю объявленную стоимость ({order['declared_value']})...")
                 _fill_declared_value(page, order["declared_value"], log)
 
-            # --- ШАГ 9: ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ (ЗАБОР КУРЬЕРОМ: АДРЕС, ДАТА, ВРЕМЯ) ---
+            # --- ШАГ 9: ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ ---
             log(f"10. Заполняю адрес, дату ({pickup_date}) и время забора ({time_from}-{time_to})...")
             _fill_after_label(
                 page,
@@ -965,15 +1082,10 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                     timeout=1500,
                 )
 
-            # --- ШАГ 10: ПВЗ / ПОСТАМАТ ИЛИ ДОСТАВКА КУРЬЕРОМ ---
-            delivery_to = order.get("delivery_to", "В ПВЗ")
+            # --- ШАГ 10: ВЫБОР ПВЗ ---
             pvz_query = (order.get("pvz_code") or order.get("pvz_address") or "").strip()
-
-            if delivery_to in ("В ПВЗ", "В ПОСТАМАТ") and pvz_query:
+            if pvz_query:
                 _select_pvz_on_cdek(page, order.get("pvz_code", ""), order.get("pvz_address", ""), log)
-            elif delivery_to == "КУРЬЕРОМ ПО АДРЕСУ" and order.get("pvz_address"):
-                log(f"11. Заполняю адрес доставки курьером: {order['pvz_address']}...")
-                _fill_after_label(page, "Улица", order["pvz_address"], section_title="Информация об отправлении")
 
             # --- ШАГ 11: КОММЕНТАРИЙ К ЗАКАЗУ (УПД) ---
             log("12. Заполняю комментарий к заказу...")
@@ -983,28 +1095,10 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             # --- ШАГ 12: СОЗДАНИЕ ЗАКАЗА ---
             log("13. Нажимаю «СОЗДАТЬ ЗАКАЗ»...")
             _safe_click_text(page, "СОЗДАТЬ ЗАКАЗ", timeout=5000)
+            page.wait_for_timeout(5000)
 
-            # --- ШАГ 13: СКАЧИВАНИЕ PDF И АВТОПЕЧАТЬ SUMATRAPDF ---
-            log("14. Жду формирование PDF-накладной для автопечати...")
-            pdf_path = None
-            try:
-                with page.expect_download(timeout=180000) as download_info:
-                    for _ in range(15):
-                        if (
-                            _safe_click_text(page, "Печать квитанции", timeout=1500)
-                            or _safe_click_text(page, "Распечатать", timeout=1500)
-                            or _safe_click_text(page, "Печать", timeout=1500)
-                        ):
-                            break
-                        page.wait_for_timeout(1500)
-
-                download = download_info.value
-                filename = f"cdek_{int(time.time())}_{download.suggested_filename}"
-                pdf_path = os.path.join(DOWNLOADS_DIR, filename)
-                download.save_as(pdf_path)
-                log(f"-> Накладная сохранена: {filename}")
-            except Exception as e:
-                log(f"[ВНИМАНИЕ] PDF не перехвачен автоматически: {e}")
+            # --- ШАГ 13: СПИСОК ЗАКАЗОВ -> ТРИ ТОЧКИ -> РАСПЕЧАТАТЬ ДОКУМЕНТЫ (3 КОПИИ) -> SUMATRAPDF ---
+            pdf_path = _download_waybill_from_order_list(page, context, copies=3, log=log)
 
             if pdf_path:
                 ok, msg = print_pdf_silent(pdf_path)
@@ -1021,7 +1115,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                     }
                 )
 
-            log("ГОТОВО! Заказ оформлен.")
-            page.wait_for_timeout(4000)
+            log("ГОТОВО! Заказ оформлен и отправлен на печать.")
+            page.wait_for_timeout(3000)
         finally:
             browser.close()
