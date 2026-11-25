@@ -445,7 +445,6 @@ def main(page: ft.Page):
         return [tok for tok in _norm_search_text(text).split() if tok not in STOP_WORDS]
 
     def _find_best_pvz(items: list[dict], target_code: str, target_addr: str) -> dict | None:
-        # Приоритет только пунктам выдачи (не постаматам)
         pvz_only = [it for it in items if it.get("type") != "Постамат"] or items
 
         code_low = (target_code or "").strip().lower()
@@ -665,6 +664,11 @@ def main(page: ft.Page):
         else:
             dd_tariff.value = "Экспресс дверь-склад"
 
+        if item.get("time_from"):
+            tf_time_from.value = item["time_from"]
+        if item.get("time_to"):
+            tf_time_to.value = item["time_to"]
+
         tf_pvz_search.value = ""
         dd_pvz_type_filter.value = "Пункт выдачи"
         loaded_pvz = []
@@ -694,6 +698,8 @@ def main(page: ft.Page):
         ed_city = ft.TextField(label="Город получателя", value=item.get("city_to", ""), dense=True)
         ed_pvz_code = ft.TextField(label="Код ПВЗ", value=item.get("pvz_code", ""), dense=True, width=140)
         ed_pvz_addr = ft.TextField(label="Адрес ПВЗ", value=item.get("pvz_address", ""), dense=True, expand=True)
+        ed_time_from = ft.TextField(label="Забор с", value=item.get("time_from", "12:00"), dense=True, width=120)
+        ed_time_to = ft.TextField(label="Забор до", value=item.get("time_to", "15:00"), dense=True, width=120)
         cur_tariff = item.get("tariff", "Экспресс дверь-склад")
         if cur_tariff not in TARIFF_OPTIONS:
             cur_tariff = "Экспресс дверь-склад"
@@ -728,6 +734,8 @@ def main(page: ft.Page):
                 "city_to": (ed_city.value or "").strip(),
                 "pvz_code": (ed_pvz_code.value or "").strip(),
                 "pvz_address": (ed_pvz_addr.value or "").strip(),
+                "time_from": (ed_time_from.value or "12:00").strip(),
+                "time_to": (ed_time_to.value or "15:00").strip(),
                 "delivery_to": "В ПВЗ",
                 "tariff": ed_tariff.value,
             }
@@ -761,7 +769,7 @@ def main(page: ft.Page):
                         ft.Row([ed_phone, ed_email]),
                         ed_city,
                         ft.Row([ed_pvz_code, ed_pvz_addr]),
-                        ed_tariff,
+                        ft.Row([ed_time_from, ed_time_to, ed_tariff]),
                     ],
                     tight=True,
                     spacing=10,
@@ -843,6 +851,8 @@ def main(page: ft.Page):
             "city_to": tf_city_to.value.strip(),
             "pvz_code": tf_pvz_code.value.strip(),
             "pvz_address": tf_pvz_address.value.strip(),
+            "time_from": tf_time_from.value.strip() or "12:00",
+            "time_to": tf_time_to.value.strip() or "15:00",
             "delivery_to": "В ПВЗ",
             "tariff": dd_tariff.value,
         }
