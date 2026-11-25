@@ -82,7 +82,6 @@ def _fill_phone_in_section(page: Page, section_title: str, phone: str) -> bool:
             loc.click()
             loc.press("ControlOrMeta+A")
             loc.press("Backspace")
-            # Если поле само держит префикс +7 — вводим 10 цифр, иначе полный номер
             current = (loc.input_value() or "").strip()
             if current.startswith("+7"):
                 loc.type(short10, delay=30)
@@ -121,12 +120,43 @@ def _safe_click_text(page: Page, text: str, timeout: int = 2500, exact: bool = F
         return False
 
 
+def _dismiss_popups(page: Page, log: Callable[[str], None]) -> None:
+    """Закрывает всплывающее окно 'В следующий раз вы можете войти по номеру телефона' (кнопка ХОРОШО)."""
+    page.wait_for_timeout(1200)
+    for btn_text in ("ХОРОШО", "Хорошо", "Понятно", "Закрыть"):
+        try:
+            btn = page.get_by_role("button", name=btn_text, exact=False).first
+            if btn.is_visible(timeout=1200):
+                log(f"-> Закрываю всплывающее окно («{btn_text}»)...")
+                btn.click(timeout=2000)
+                page.wait_for_timeout(700)
+                return
+        except Exception:
+            pass
+        try:
+            loc = page.get_by_text(btn_text, exact=True).first
+            if loc.is_visible(timeout=800):
+                log(f"-> Закрываю всплывающее окно («{btn_text}»)...")
+                loc.click(timeout=2000)
+                page.wait_for_timeout(700)
+                return
+        except Exception:
+            pass
+
+    # На случай если окно без текста кнопки — жмём Escape
+    try:
+        if page.get_by_text("войти по номеру телефона", exact=False).first.is_visible(timeout=500):
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+
 def _fill_city_field(page: Page, field_label: str, city_value: str, use_moscow_quicklink: bool = False) -> bool:
     """Заполняет поле города отправителя или получателя и выбирает город из выпадающего списка."""
     if not city_value:
         return False
 
-    # Для города отправителя «Москва» — пробуем быструю ссылку «Москва» прямо под полем
     if use_moscow_quicklink and "москва" in city_value.lower():
         try:
             quick = page.locator(
@@ -143,7 +173,6 @@ def _fill_city_field(page: Page, field_label: str, city_value: str, use_moscow_q
         except Exception:
             pass
 
-    # Основной способ: ввод города в конкретное поле + выбор из подсказок
     inp = page.locator(
         f"xpath=//*[contains(text(), '{field_label}')]/following::input[not(@type='hidden') and not(@disabled)][1]"
     ).first
@@ -221,7 +250,9 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
 
             log("-> Жду загрузку кабинета (если есть капча — реши её в браузере)...")
             page.wait_for_selector("text=Новый заказ", timeout=180000)
-            page.wait_for_timeout(1000)
+
+            # Закрываем всплывающее окно «В следующий раз вы можете войти по номеру телефона»
+            _dismiss_popups(page, log)
 
             # --- ШАГ 2: КЛИК «Новый заказ» ---
             log("3. Открываю «Новый заказ»...")
@@ -259,7 +290,6 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             page.wait_for_timeout(500)
 
             if rec_type == "ЮР. ЛИЦО":
-                # Если выбрано ЮР. ЛИЦО, заполняем также наименование компании, если поле появилось
                 _fill_after_label(page, "Наименование", order.get("recipient_fio", ""), section_title="Получатель")
 
             _fill_after_label(page, "ФИО", order.get("recipient_fio", ""), section_title="Получатель")
