@@ -120,66 +120,100 @@ def _safe_click_text(page: Page, text: str, timeout: int = 2500, exact: bool = F
         return False
 
 
-def _dismiss_popups(page: Page, log: Callable[[str], None], wait_sec: float = 6.0) -> bool:
-    """Ждёт и закрывает всплывающее окно 'В следующий раз вы можете войти по номеру телефона' (кнопка ХОРОШО)."""
-    deadline = time.time() + wait_sec
+def _dismiss_popups_once(page: Page, log: Callable[[str], None]) -> bool:
+    """Одна быстрая попытка закрыть всплывающее окно 'ХОРОШО'."""
     pattern = re.compile(r"^\s*(хорошо|понятно|закрыть)\s*$", re.IGNORECASE)
 
-    while time.time() < deadline:
-        # Проверяем основную страницу и все вложенные фреймы
-        for frame in page.frames:
-            try:
-                btn = frame.get_by_role("button", name=pattern).first
-                if btn.is_visible(timeout=300):
-                    log("-> Нажимаю «ХОРОШО» во всплывающем окне...")
-                    btn.click(force=True, timeout=2000)
-                    page.wait_for_timeout(700)
-                    return True
-            except Exception:
-                pass
-
-            try:
-                loc = frame.get_by_text(pattern).first
-                if loc.is_visible(timeout=300):
-                    log("-> Нажимаю «ХОРОШО» во всплывающем окне...")
-                    loc.click(force=True, timeout=2000)
-                    page.wait_for_timeout(700)
-                    return True
-            except Exception:
-                pass
-
-        # Резерв: прямой клик через JavaScript по тексту кнопки или крестику модалки
+    for frame in page.frames:
         try:
-            clicked_js = page.evaluate(
-                """() => {
-                    const targets = Array.from(document.querySelectorAll('button, a, div, span'));
-                    for (const el of targets) {
-                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        if (txt === 'хорошо' && el.offsetParent !== null) {
-                            el.click();
-                            return 'хорошо';
-                        }
-                    }
-                    const modalText = document.body.innerText || '';
-                    if (modalText.toLowerCase().includes('войти по номеру телефона')) {
-                        const closeBtn = document.querySelector('[class*="close" i], [aria-label*="close" i], [aria-label*="закрыть" i]');
-                        if (closeBtn) {
-                            closeBtn.click();
-                            return 'close';
-                        }
-                    }
-                    return null;
-                }"""
-            )
-            if clicked_js:
-                log(f"-> Закрыл всплывающее окно через JS ({clicked_js})...")
-                page.wait_for_timeout(700)
+            btn = frame.get_by_role("button", name=pattern).first
+            if btn.is_visible(timeout=250):
+                log("-> Нажимаю «ХОРОШО» во всплывающем окне...")
+                btn.click(force=True, timeout=2000)
+                page.wait_for_timeout(500)
                 return True
         except Exception:
             pass
 
-        page.wait_for_timeout(400)
+        try:
+            loc = frame.get_by_text(pattern).first
+            if loc.is_visible(timeout=250):
+                log("-> Нажимаю «ХОРОШО» во всплывающем окне...")
+                loc.click(force=True, timeout=2000)
+                page.wait_for_timeout(500)
+                return True
+        except Exception:
+            pass
 
+    try:
+        clicked_js = page.evaluate(
+            """() => {
+                const targets = Array.from(document.querySelectorAll('button, a, div, span'));
+                for (const el of targets) {
+                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    if (txt === 'хорошо' && el.offsetParent !== null) {
+                        el.click();
+                        return 'хорошо';
+                    }
+                }
+                const modalText = (document.body && document.body.innerText) || '';
+                if (modalText.toLowerCase().includes('войти по номеру телефона')) {
+                    const closeBtn = document.querySelector('[class*="close" i], [aria-label*="close" i], [aria-label*="закрыть" i]');
+                    if (closeBtn) {
+                        closeBtn.click();
+                        return 'close';
+                    }
+                }
+                return null;
+            }"""
+        )
+        if clicked_js:
+            log(f"-> Закрыл всплывающее окно ({clicked_js})...")
+            page.wait_for_timeout(500)
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _dismiss_popups(page: Page, log: Callable[[str], None], wait_sec: float = 4.0) -> bool:
+    deadline = time.time() + wait_sec
+    while time.time() < deadline:
+        if _dismiss_popups_once(page, log):
+            return True
+        page.wait_for_timeout(350)
+    return False
+
+
+def _wait_for_cabinet_loaded(page: Page, log: Callable[[str], None], timeout_sec: int = 180) -> bool:
+    """Ждёт входа в личный кабинет по URL или содержимому и сразу закрывает модалку 'ХОРОШО'."""
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        url = (page.url or "").lower()
+        # Если уже попали в кабинет (order-history или любая страница после login/auth)
+        if "order-history" in url or ("lk.cdek.ru" in url and "login" not in url and "auth" not in url and url.rstrip("/") != "https://lk.cdek.ru"):
+            _dismiss_popups(page, log, wait_sec=3.5)
+            return True
+
+        # Если на странице уже появился заголовок кабинета или модалка «ХОРОШО»
+        if _dismiss_popups_once(page, log):
+            return True
+
+        try:
+            has_menu = page.evaluate(
+                """() => {
+                    const t = (document.body && document.body.innerText) || '';
+                    return t.includes('Список заказов') || t.includes('Новый заказ');
+                }"""
+            )
+            if has_menu:
+                _dismiss_popups(page, log, wait_sec=3.5)
+                return True
+        except Exception:
+            pass
+
+        page.wait_for_timeout(500)
     return False
 
 
@@ -280,27 +314,42 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 page.keyboard.press("Enter")
 
             log("-> Жду загрузку кабинета (если есть капча — реши её в браузере)...")
-            page.wait_for_selector("text=Новый заказ", timeout=180000)
+            if not _wait_for_cabinet_loaded(page, log, timeout_sec=180):
+                raise RuntimeError("Не удалось дождаться входа в личный кабинет СДЭК.")
 
-            # Ждём и закрываем всплывающее окно «В следующий раз вы можете войти по номеру телефона»
-            _dismiss_popups(page, log, wait_sec=6.0)
-
-            # --- ШАГ 2: КЛИК «Новый заказ» (с защитой от повторного попапа) ---
+            # --- ШАГ 2: КЛИК «Новый заказ» / «НОВЫЙ ЗАКАЗ» ---
             log("3. Открываю «Новый заказ»...")
-            for _ in range(3):
-                _dismiss_popups(page, log, wait_sec=1.0)
-                try:
-                    page.get_by_role("link", name="Новый заказ", exact=True).first.click(timeout=3500)
-                except Exception:
-                    if not _safe_click_text(page, "Новый заказ", timeout=3500, exact=True):
-                        _safe_click_text(page, "НОВЫЙ ЗАКАЗ", timeout=3500)
-                try:
-                    page.wait_for_selector("text=О заказе", timeout=6000)
-                    break
-                except Exception:
-                    continue
+            opened_new_order = False
+            for _ in range(4):
+                _dismiss_popups_once(page, log)
+                clicked = False
+                for selector in (
+                    "a:has-text('Новый заказ')",
+                    "button:has-text('НОВЫЙ ЗАКАЗ')",
+                    "text=Новый заказ",
+                    "text=НОВЫЙ ЗАКАЗ",
+                ):
+                    try:
+                        loc = page.locator(selector).first
+                        if loc.is_visible(timeout=1500):
+                            loc.click(force=True, timeout=3000)
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
 
-            page.wait_for_selector("text=О заказе", timeout=30000)
+                if clicked:
+                    try:
+                        page.wait_for_selector("text=О заказе", timeout=8000)
+                        opened_new_order = True
+                        break
+                    except Exception:
+                        pass
+                page.wait_for_timeout(800)
+
+            if not opened_new_order:
+                page.wait_for_selector("text=О заказе", timeout=25000)
+
             page.wait_for_timeout(1500)
 
             # --- ШАГ 3: БЛОК «О ЗАКАЗЕ» ---
