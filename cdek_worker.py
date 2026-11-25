@@ -409,7 +409,6 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
                         const r = el.getBoundingClientRect();
                         const ox = r.left + r.width / 2;
                         const oy = r.top + r.height / 2;
-                        // Ячейки сетки всегда рядом с полем (до 450px по вертикали/горизонтали)
                         if (Math.abs(ox - cx) > 450 || Math.abs(oy - cy) > 450) continue;
                         opts.push({val: txt, x: ox, y: oy});
                     }
@@ -438,12 +437,10 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
         if not box:
             return None
 
-        # 1. Кликаем по левой части поля (прямо по цифрам, мимо серого крестика)
         inp.click(position={"x": min(22, box["width"] * 0.25), "y": box["height"] / 2}, timeout=2500)
         page.wait_for_timeout(550)
         opts = _read_popup_options(box)
 
-        # 2. Если сетка не открылась — кликаем по зелёной кнопке с часами справа от input
         if len(opts) < 2:
             page.mouse.click(box["x"] + box["width"] + 16, box["y"] + box["height"] / 2)
             page.wait_for_timeout(550)
@@ -466,7 +463,6 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
                 if _read_val(inp) == chosen["val"]:
                     return chosen["val"]
 
-        # 3. Резерв: прямой ввод в masked-input (если сетка не перехватила клик)
         try:
             inp.click(position={"x": min(22, box["width"] * 0.25), "y": box["height"] / 2}, timeout=2000)
             page.wait_for_timeout(150)
@@ -499,7 +495,6 @@ def _select_pickup_time(page: Page, time_from: str, time_to: str, log: Callable[
             log(f"-> Время забора подтверждено: {cur_from} - {cur_to}")
             return
 
-        # Если нужно сдвинуть конец вперёд — сначала правое поле, затем левое
         if _to_min(time_to) > _to_min(cur_to) >= 0:
             _open_and_pick(inp_to, time_to)
             page.wait_for_timeout(350)
@@ -1159,10 +1154,17 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             _click_in_section(page, "Получатель", rec_type)
             page.wait_for_timeout(500)
 
-            if rec_type == "ЮР. ЛИЦО":
-                _fill_after_label(page, "Наименование", order.get("recipient_fio", ""), section_title="Получатель")
+            rec_company = (order.get("recipient_company") or "").strip()
+            rec_fio = (order.get("recipient_fio") or "").strip()
 
-            _fill_after_label(page, "ФИО", order.get("recipient_fio", ""), section_title="Получатель")
+            if rec_type == "ЮР. ЛИЦО":
+                company_val = rec_company or rec_fio
+                fio_val = rec_fio or rec_company
+                _fill_after_label(page, "Наименование", company_val, section_title="Получатель")
+                _fill_after_label(page, "ФИО", fio_val, section_title="Получатель")
+            else:
+                _fill_after_label(page, "ФИО", rec_fio or rec_company, section_title="Получатель")
+
             _fill_phone_in_section(page, "Получатель", order.get("recipient_phone", ""))
             if order.get("recipient_email"):
                 _fill_after_label(page, "Электронная почта", order["recipient_email"], section_title="Получатель")
@@ -1247,7 +1249,7 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 log(f"-> {msg}")
                 add_history_entry(
                     {
-                        "recipient": order.get("recipient_fio", ""),
+                        "recipient": order.get("recipient_company") or order.get("recipient_fio", ""),
                         "city_to": order.get("city_to", ""),
                         "date": pickup_date,
                         "tariff": order.get("tariff", ""),
