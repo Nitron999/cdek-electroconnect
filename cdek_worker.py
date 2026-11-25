@@ -49,7 +49,7 @@ def _fill_autocomplete(page: Page, selectors: list[str], value: str) -> bool:
 
 
 def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
-    """Выполняет оформление заказа в lk.cdek.ru и печатает накладную."""
+    """Выполняет оформление заказа в lk.cdek.ru и печатает накладную через SumatraPDF."""
     login = order.get("login", "").strip()
     password = order.get("password", "").strip()
 
@@ -61,7 +61,6 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             "--no-sandbox",
         ]
         try:
-            # Используем установленный Google Chrome, чтобы не качать Chromium
             browser = p.chromium.launch(
                 channel="chrome",
                 headless=False,
@@ -130,8 +129,6 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             # --- БЛОК 1: О ЗАКАЗЕ ---
             log("4. Заполняю блок «О заказе»...")
             if order.get("template"):
-                if _safe_click_text(page, "Шаблон заказа", timeout=2000):
-                    page.wait_for_timeout(500)
                 _fill_autocomplete(
                     page,
                     [
@@ -238,14 +235,14 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 )
 
             # --- БЛОК 7: ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ ---
-            log("10. Заполняю адрес, дату и интервал забора...")
+            log("10. Заполняю адрес, дату и время забора...")
             _safe_fill(
                 page,
                 [
                     "label:has-text('Адрес') >> .. >> input",
                     "input[placeholder*='Адрес' i]",
                 ],
-                order.get("pickup_address", "Сущевская 21 оф 426"),
+                order.get("pickup_address", "Шоссейная 21, офис 426"),
             )
             if order.get("courier_comment"):
                 _safe_fill(
@@ -263,7 +260,37 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
             if order.get("time_to"):
                 _safe_click_text(page, order["time_to"], timeout=1500)
 
-            # Комментарий к заказу
+            if order.get("need_attorney"):
+                _safe_click_text(page, "Курьеру необходима доверенность", timeout=1500)
+            if order.get("need_id_doc"):
+                _safe_click_text(page, "Курьеру необходим документ удостоверяющий личность", timeout=1500)
+
+            # --- ВЫБОР ПВЗ ИЛИ ПОСТАМАТА ---
+            pvz_query = (order.get("pvz_code") or order.get("pvz_address") or "").strip()
+            if pvz_query and order.get("delivery_to") in ("В ПВЗ", "В ПОСТАМАТ"):
+                log(f"11. Выбираю ПВЗ/постамат: {pvz_query}...")
+                # Если ПВЗ уже выбран из шаблона — жмём ИЗМЕНИТЬ
+                _safe_click_text(page, "ИЗМЕНИТЬ", timeout=1500)
+                page.wait_for_timeout(800)
+
+                if _safe_fill(
+                    page,
+                    [
+                        "input[placeholder*='Поиск по ПВЗ' i]",
+                        "input[placeholder*='постамат' i]",
+                    ],
+                    pvz_query,
+                ):
+                    page.wait_for_timeout(1500)
+                    # Кликаем по найденному пункту в списке слева от карты
+                    if not _safe_click_text(page, pvz_query, timeout=3000):
+                        if order.get("pvz_address"):
+                            _safe_click_text(page, order["pvz_address"], timeout=3000)
+                    page.wait_for_timeout(800)
+                    _safe_click_text(page, "Выбрать", timeout=2000)
+
+            # --- КОММЕНТАРИЙ К ЗАКАЗУ ---
+            log("12. Заполняю комментарий к заказу...")
             if order.get("order_comment"):
                 _safe_fill(
                     page,
@@ -275,22 +302,20 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                 )
 
             # --- СОЗДАНИЕ ЗАКАЗА ---
-            if order.get("auto_submit"):
-                log("11. Нажимаю «СОЗДАТЬ ЗАКАЗ»...")
-                _safe_click_text(page, "СОЗДАТЬ ЗАКАЗ", timeout=5000)
-            else:
-                log("11. Проверь ПВЗ/поля в браузере и нажми «СОЗДАТЬ ЗАКАЗ» (жду печать)...")
+            log("13. Нажимаю «СОЗДАТЬ ЗАКАЗ»...")
+            _safe_click_text(page, "СОЗДАТЬ ЗАКАЗ", timeout=5000)
 
             # --- ПЕРЕХВАТ СКАЧИВАНИЯ PDF И АВТОПЕЧАТЬ ---
-            log("12. Ожидаю формирование накладной PDF (нажми «Печать» в СДЭК, если не скачалась сама)...")
+            log("14. Жду формирование PDF-накладной для автопечати...")
             pdf_path = None
             try:
                 with page.expect_download(timeout=180000) as download_info:
-                    # Пробуем сами нажать кнопку печати накладной после создания заказа
-                    for _ in range(12):
-                        if _safe_click_text(page, "Печать квитанции", timeout=1500) or _safe_click_text(
-                            page, "Распечатать", timeout=1500
-                        ) or _safe_click_text(page, "Печать", timeout=1500):
+                    for _ in range(15):
+                        if (
+                            _safe_click_text(page, "Печать квитанции", timeout=1500)
+                            or _safe_click_text(page, "Распечатать", timeout=1500)
+                            or _safe_click_text(page, "Печать", timeout=1500)
+                        ):
                             break
                         page.wait_for_timeout(1500)
 
@@ -311,12 +336,13 @@ def run_cdek_order(order: dict, log: Callable[[str], None]) -> None:
                         "city_to": order.get("city_to", ""),
                         "date": order.get("pickup_date", ""),
                         "tariff": order.get("tariff", ""),
+                        "pvz": pvz_query,
                         "pdf": os.path.basename(pdf_path),
                         "printed": ok,
                     }
                 )
 
-            log("ГОТОВО! Можно закрыть окно браузера или оформить следующий заказ.")
+            log("ГОТОВО! Заказ оформлен.")
             page.wait_for_timeout(4000)
         finally:
             browser.close()
