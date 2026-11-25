@@ -1,13 +1,28 @@
+import re
 import requests
 from playwright.sync_api import sync_playwright
 
 
 def _extract_city_name(city_full: str) -> str:
-    """Из 'Ижевск, Удмуртия, Россия' оставляет 'Ижевск'."""
+    """Из 'Орёл, Орловская область, Россия' или 'Ижевск, Удмуртия, Россия' оставляет 'Орёл' / 'Ижевск'."""
     return (city_full or "").split(",")[0].strip()
 
 
-def _parse_pvz_list(raw_items: list) -> list[dict]:
+def _normalize_city(city: str) -> str:
+    return re.sub(r"\s+", " ", (city or "").lower().replace("ё", "е")).strip()
+
+
+def _matches_city(item: dict, target_city_norm: str) -> bool:
+    if not target_city_norm:
+        return True
+    city_field = _normalize_city(item.get("city", ""))
+    addr_field = _normalize_city(item.get("address", ""))
+    if city_field:
+        return target_city_norm in city_field or city_field in target_city_norm
+    return target_city_norm in addr_field
+
+
+def _parse_pvz_list(raw_items: list, target_city_norm: str = "") -> list[dict]:
     result = []
     seen = set()
     for item in raw_items:
@@ -15,8 +30,16 @@ def _parse_pvz_list(raw_items: list) -> list[dict]:
             continue
         code = str(item.get("code") or item.get("Code") or "").strip()
         loc = item.get("location") or {}
+        city = str(
+            loc.get("city")
+            or item.get("city")
+            or item.get("City")
+            or item.get("cityName")
+            or ""
+        ).strip()
         address = (
             loc.get("address")
+            or loc.get("address_full")
             or item.get("address")
             or item.get("Address")
             or item.get("fullAddress")
@@ -24,50 +47,57 @@ def _parse_pvz_list(raw_items: list) -> list[dict]:
         ).strip()
         if not address and not code:
             continue
-        key = code or address
-        if key in seen:
-            continue
-        seen.add(key)
 
         raw_type = str(item.get("type") or item.get("Type") or "PVZ").upper()
         pvz_type = "Постамат" if "POSTAMAT" in raw_type or "ПОСТАМАТ" in raw_type else "Пункт выдачи"
         work_time = str(item.get("work_time") or item.get("workTime") or item.get("WorkTime") or "").strip()
-        result.append(
-            {
-                "code": code,
-                "type": pvz_type,
-                "address": address,
-                "work_time": work_time,
-            }
-        )
+
+        parsed_item = {
+            "code": code,
+            "city": city,
+            "type": pvz_type,
+            "address": address,
+            "work_time": work_time,
+        }
+
+        if target_city_norm and not _matches_city(parsed_item, target_city_norm):
+            continue
+
+        key = code or f"{city}_{address}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(parsed_item)
     return result
 
 
 def fetch_cdek_pvz(city_full: str) -> tuple[list[dict], str]:
-    """Загружает пункты выдачи и постаматы СДЭК для указанного города."""
+    """Загружает пункты выдачи и постаматы СДЭК строго для указанного города."""
     city = _extract_city_name(city_full)
     if not city:
         return [], "Укажи город получателя."
 
-    # 1. Быстрая попытка через публичный эндпоинт СДЭК
+    target_norm = _normalize_city(city)
+
+    # 1. Быстрая попытка через публичный эндпоинт СДЭК с фильтрацией по городу
     try:
         resp = requests.get(
             "https://integration.cdek.ru/pvzlist/v1/json",
             params={"cityName": city, "type": "ALL"},
-            timeout=8,
+            timeout=10,
             headers={"User-Agent": "Mozilla/5.0"},
         )
         if resp.status_code == 200:
             data = resp.json()
             raw = data.get("pvz") if isinstance(data, dict) else data
             if isinstance(raw, list) and raw:
-                parsed = _parse_pvz_list(raw)
+                parsed = _parse_pvz_list(raw, target_city_norm=target_norm)
                 if parsed:
                     return parsed, f"Загружено {len(parsed)} пунктов ({city})"
     except Exception:
         pass
 
-    # 2. Резервный способ: подтягиваем список ПВЗ с сайта cdek.ru в фоне
+    # 2. Резервный способ: подтягиваем список ПВЗ с сайта cdek.ru для нужного города
     collected = []
     try:
         with sync_playwright() as p:
@@ -91,11 +121,11 @@ def fetch_cdek_pvz(city_full: str) -> tuple[list[dict], str]:
                         if "json" in ct:
                             body = response.json()
                             if isinstance(body, list):
-                                collected.extend(_parse_pvz_list(body))
+                                collected.extend(_parse_pvz_list(body, target_city_norm=target_norm))
                             elif isinstance(body, dict):
                                 for k in ("data", "items", "pvz", "offices", "deliverypoints"):
                                     if isinstance(body.get(k), list):
-                                        collected.extend(_parse_pvz_list(body[k]))
+                                        collected.extend(_parse_pvz_list(body[k], target_city_norm=target_norm))
                 except Exception:
                     pass
 
@@ -117,11 +147,10 @@ def fetch_cdek_pvz(city_full: str) -> tuple[list[dict], str]:
         return [], f"Не удалось подгрузить ПВЗ автоматически ({e}). Можно ввести адрес/код ПВЗ вручную."
 
     if collected:
-        # Убираем дубликаты
         unique = {}
         for item in collected:
             unique[item["code"] or item["address"]] = item
         items = list(unique.values())
         return items, f"Загружено {len(items)} пунктов ({city})"
 
-    return [], f"ПВЗ для «{city}» не найдены автоматически — впиши код (напр. IZHV16) или адрес вручную."
+    return [], f"Пункты для города «{city}» не найдены — проверь город получателя или впиши адрес/код ПВЗ вручную."
