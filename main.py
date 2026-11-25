@@ -3,6 +3,7 @@ import threading
 import flet as ft
 from storage import load_recipients, save_recipients, load_history
 from printer import is_sumatra_ready
+from cdek_pvz import fetch_cdek_pvz
 from cdek_worker import run_cdek_order
 
 
@@ -11,23 +12,29 @@ def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = "#0f141e"
     page.padding = 0
-    page.window.width = 1360
-    page.window.height = 860
-    page.window.min_width = 1100
-    page.window.min_height = 700
+    page.window.width = 1380
+    page.window.height = 880
+    page.window.min_width = 1120
+    page.window.min_height = 720
 
     recipients = load_recipients()
+    loaded_pvz: list[dict] = []
     today = datetime.date.today()
     tomorrow = today + datetime.timedelta(days=1)
 
-    # --- ПОЛЯ ФОРМЫ (все параметры со скриншотов СДЭК) ---
+    # --- ПОЛЯ ФОРМЫ ---
     tf_login = ft.TextField(label="Логин СДЭК", value="KU-TOM11-8", dense=True, expand=1)
     tf_password = ft.TextField(
-        label="Пароль СДЭК", value="Ddf343rg@3!ertb", password=True, can_reveal_password=True, dense=True, expand=1
+        label="Пароль СДЭК",
+        value="Ddf343rg@3!ertb",
+        password=True,
+        can_reveal_password=True,
+        dense=True,
+        expand=1,
     )
 
     # 1. О заказе
-    tf_template = ft.TextField(label="Шаблон заказа (если есть в СДЭК)", value="Патрушев Илья Сергеевич", dense=True, expand=2)
+    tf_template = ft.TextField(label="Шаблон заказа", value="Патрушев Илья Сергеевич", dense=True, expand=2)
     dd_role = ft.Dropdown(
         label="Кем я являюсь",
         value="ОТПРАВИТЕЛЕМ",
@@ -61,7 +68,7 @@ def main(page: ft.Page):
     )
     tf_rec_fio = ft.TextField(label="ФИО / Название получателя", value="Патрушев Илья Сергеевич", dense=True, expand=2)
     tf_rec_phone = ft.TextField(label="Телефон получателя", value="+7 950 152 10 79", dense=True, expand=1)
-    tf_rec_email = ft.TextField(label="Электронная почта (необязательно)", value="", dense=True, expand=1)
+    tf_rec_email = ft.TextField(label="Электронная почта", value="", dense=True, expand=1)
 
     # 4. Товары
     tf_weight = ft.TextField(label="Вес, кг", value="0.5", dense=True, expand=1)
@@ -99,21 +106,51 @@ def main(page: ft.Page):
         dense=True,
         expand=2,
     )
-    cb_insurance = ft.Checkbox(label="Объявленная стоимость", value=True)
-    tf_declared = ft.TextField(label="Сумма, ₽", value="3000", dense=True, width=140)
+    cb_insurance = ft.Checkbox(label="Дополнительный сбор за объявленную стоимость", value=True)
+    tf_declared = ft.TextField(label="Объявленная стоимость, ₽", value="3000", dense=True, width=200)
 
-    # 6. Информация об отправлении
-    tf_pickup_address = ft.TextField(label="Адрес забора курьером", value="Сущевская 21 оф 426", dense=True, expand=2)
+    # 6. Информация об отправлении (забор курьером + ПВЗ/постамат + комментарий)
+    tf_pickup_address = ft.TextField(
+        label="Адрес забора курьером",
+        value="Шоссейная 21, офис 426",
+        dense=True,
+        expand=2,
+    )
     tf_courier_comment = ft.TextField(label="Комментарий для курьера", value="", dense=True, expand=1)
-    tf_pickup_date = ft.TextField(label="Дата забора", value=tomorrow.strftime("%d.%m.%Y"), dense=True, expand=1)
-    tf_time_from = ft.TextField(label="Время с", value="12:00", dense=True, width=100)
-    tf_time_to = ft.TextField(label="Время до", value="15:00", dense=True, width=100)
-    tf_pvz = ft.TextField(label="ПВЗ / Адрес получателя", value="ул. Азина, 135", dense=True, expand=1)
-    tf_order_comment = ft.TextField(label="Комментарий к заказу", value="УПД", dense=True, expand=1)
+    tf_pickup_date = ft.TextField(label="Дата забора", value=tomorrow.strftime("%d.%m.%Y"), dense=True, width=150)
+    tf_time_from = ft.TextField(label="Забор с", value="12:00", dense=True, width=105)
+    tf_time_to = ft.TextField(label="Забор до", value="15:00", dense=True, width=105)
 
-    cb_auto_submit = ft.Checkbox(
-        label="Автоматически нажать «СОЗДАТЬ ЗАКАЗ» (если снять — сможешь проверить ПВЗ глазами)",
-        value=True,
+    cb_attorney = ft.Checkbox(label="Курьеру необходима доверенность", value=False)
+    cb_id_doc = ft.Checkbox(label="Курьеру необходим документ удостоверяющий личность", value=False)
+
+    # Выбор ПВЗ / постамата
+    tf_pvz_code = ft.TextField(label="Код ПВЗ", value="IZHV16", dense=True, width=130)
+    tf_pvz_address = ft.TextField(label="Выбранный ПВЗ / постамат", value="ул. Азина, 135", dense=True, expand=True)
+    tf_pvz_search = ft.TextField(
+        hint_text="Поиск по ПВЗ/постамату (улица или код)...",
+        prefix_icon=ft.icons.SEARCH,
+        dense=True,
+        expand=True,
+    )
+    dd_pvz_type_filter = ft.Dropdown(
+        label="Тип",
+        value="Все",
+        options=[ft.dropdown.Option("Все"), ft.dropdown.Option("Пункт выдачи"), ft.dropdown.Option("Постамат")],
+        dense=True,
+        width=160,
+    )
+    pvz_status_text = ft.Text("Нажми «Загрузить ПВЗ», чтобы подтянуть пункты выдачи из интернета.", size=12, color="#94a3b8")
+    pvz_list_view = ft.ListView(height=160, spacing=5)
+
+    # Комментарий к заказу (УПД по умолчанию, можно редактировать)
+    tf_order_comment = ft.TextField(
+        label="Комментарий к заказу",
+        value="УПД",
+        multiline=True,
+        min_lines=2,
+        max_lines=3,
+        dense=True,
     )
 
     log_view = ft.ListView(height=110, spacing=3, auto_scroll=True)
@@ -132,6 +169,94 @@ def main(page: ft.Page):
         tf_time_to.value = t2
         page.update()
 
+    # --- ЛОГИКА ЗАГРУЗКИ И ВЫБОРА ПВЗ ---
+    def select_pvz(item: dict):
+        tf_pvz_code.value = item.get("code", "")
+        tf_pvz_address.value = item.get("address", "")
+        if item.get("type") == "Постамат":
+            dd_delivery_to.value = "В ПОСТАМАТ"
+        else:
+            dd_delivery_to.value = "В ПВЗ"
+        add_log(f"Выбран пункт: {item.get('code')} — {item.get('address')}")
+        page.update()
+
+    def render_pvz_list(_=None):
+        query = (tf_pvz_search.value or "").strip().lower()
+        t_filter = dd_pvz_type_filter.value
+        pvz_list_view.controls.clear()
+
+        for item in loaded_pvz:
+            if t_filter != "Все" and item.get("type") != t_filter:
+                continue
+            haystack = f"{item.get('code', '')} {item.get('address', '')}".lower()
+            if query and query not in haystack:
+                continue
+
+            is_postamat = item.get("type") == "Постамат"
+            badge_color = "#38bdf8" if is_postamat else "#10b981"
+
+            pvz_list_view.controls.append(
+                ft.Container(
+                    bgcolor="#1b2333",
+                    border_radius=8,
+                    padding=ft.padding.symmetric(horizontal=10, vertical=7),
+                    on_click=lambda e, it=item: select_pvz(it),
+                    content=ft.Row(
+                        [
+                            ft.Container(
+                                width=9,
+                                height=9,
+                                border_radius=5,
+                                bgcolor=badge_color,
+                            ),
+                            ft.Column(
+                                [
+                                    ft.Row(
+                                        [
+                                            ft.Text(item.get("code", ""), size=12, weight=ft.FontWeight.BOLD, color="#f8fafc"),
+                                            ft.Text(f"• {item.get('type', '')}", size=11, color=badge_color),
+                                        ],
+                                        spacing=6,
+                                    ),
+                                    ft.Text(item.get("address", ""), size=12, color="#cbd5e1"),
+                                    ft.Text(item.get("work_time", ""), size=10, color="#64748b"),
+                                ],
+                                spacing=1,
+                                expand=True,
+                            ),
+                            ft.Icon(ft.icons.CHECK_CIRCLE_OUTLINE, size=18, color="#64748b"),
+                        ]
+                    ),
+                )
+            )
+        page.update()
+
+    btn_load_pvz = ft.ElevatedButton(
+        "Загрузить ПВЗ из интернета",
+        icon=ft.icons.CLOUD_DOWNLOAD,
+        bgcolor="#1e293b",
+        color="#38bdf8",
+    )
+
+    def on_load_pvz_click(_):
+        btn_load_pvz.disabled = True
+        pvz_status_text.value = f"Загружаю пункты выдачи для «{tf_city_to.value}»..."
+        page.update()
+
+        def worker():
+            nonlocal loaded_pvz
+            items, msg = fetch_cdek_pvz(tf_city_to.value)
+            loaded_pvz = items
+            pvz_status_text.value = msg
+            btn_load_pvz.disabled = False
+            render_pvz_list()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    btn_load_pvz.on_click = on_load_pvz_click
+    tf_pvz_search.on_change = render_pvz_list
+    dd_pvz_type_filter.on_change = render_pvz_list
+
     # --- СПРАВОЧНИК ПОЛУЧАТЕЛЕЙ (ПРАВАЯ ПАНЕЛЬ) ---
     tf_search = ft.TextField(
         hint_text="Поиск получателя...",
@@ -148,7 +273,8 @@ def main(page: ft.Page):
         tf_rec_phone.value = item.get("phone", "")
         tf_rec_email.value = item.get("email", "")
         tf_city_to.value = item.get("city_to", "")
-        tf_pvz.value = item.get("pvz_address", "")
+        tf_pvz_code.value = item.get("pvz_code", "")
+        tf_pvz_address.value = item.get("pvz_address", "")
         dd_delivery_to.value = item.get("delivery_to", "В ПВЗ")
         dd_tariff.value = item.get("tariff", "Экспресс дверь-склад")
         add_log(f"Загружен получатель: {item.get('name')}")
@@ -209,7 +335,8 @@ def main(page: ft.Page):
             "phone": tf_rec_phone.value.strip(),
             "email": tf_rec_email.value.strip(),
             "city_to": tf_city_to.value.strip(),
-            "pvz_address": tf_pvz.value.strip(),
+            "pvz_code": tf_pvz_code.value.strip(),
+            "pvz_address": tf_pvz_address.value.strip(),
             "delivery_to": dd_delivery_to.value,
             "tariff": dd_tariff.value,
         }
@@ -223,23 +350,23 @@ def main(page: ft.Page):
     tf_search.on_change = refresh_recipients
     recipients_header = ft.Text(f"Справочник получателей ({len(recipients)})", size=15, weight=ft.FontWeight.BOLD)
 
-    # --- ЗАПУСК ОФОРМЛЕНИЯ ---
+    # --- КНОПКА «СОЗДАТЬ ЗАКАЗ» ---
     btn_run = ft.ElevatedButton(
-        text="ОФОРМИТЬ И РАСПЕЧАТАТЬ НАКЛАДНУЮ",
+        text="СОЗДАТЬ ЗАКАЗ",
         icon=ft.icons.LOCAL_SHIPPING,
-        bgcolor="#f59e0b",
+        bgcolor="#10b981",
         color="#0f141e",
-        height=48,
+        height=50,
         style=ft.ButtonStyle(
             shape=ft.RoundedRectangleBorder(radius=10),
-            text_style=ft.TextStyle(weight=ft.FontWeight.BOLD, size=14),
+            text_style=ft.TextStyle(weight=ft.FontWeight.BOLD, size=15),
         ),
         expand=True,
     )
 
     def on_run_click(_):
         btn_run.disabled = True
-        btn_run.text = "ОФОРМЛЕНИЕ В ПРОЦЕССЕ..."
+        btn_run.text = "ОФОРМЛЯЮ ЗАКАЗ И ПЕЧАТАЮ..."
         log_view.controls.clear()
         page.update()
 
@@ -273,9 +400,11 @@ def main(page: ft.Page):
             "pickup_date": tf_pickup_date.value,
             "time_from": tf_time_from.value,
             "time_to": tf_time_to.value,
-            "pvz_address": tf_pvz.value,
+            "need_attorney": cb_attorney.value,
+            "need_id_doc": cb_id_doc.value,
+            "pvz_code": tf_pvz_code.value,
+            "pvz_address": tf_pvz_address.value,
             "order_comment": tf_order_comment.value,
-            "auto_submit": cb_auto_submit.value,
         }
 
         def worker():
@@ -285,7 +414,7 @@ def main(page: ft.Page):
                 add_log(f"[ОШИБКА]: {exc}")
             finally:
                 btn_run.disabled = False
-                btn_run.text = "ОФОРМИТЬ И РАСПЕЧАТАТЬ НАКЛАДНУЮ"
+                btn_run.text = "СОЗДАТЬ ЗАКАЗ"
                 refresh_history()
                 page.update()
 
@@ -293,7 +422,6 @@ def main(page: ft.Page):
 
     btn_run.on_click = on_run_click
 
-    # --- ВСПОМОГАТЕЛЬНАЯ КАРТОЧКА ---
     def section_card(title: str, controls: list):
         return ft.Container(
             bgcolor="#161d2b",
@@ -319,7 +447,7 @@ def main(page: ft.Page):
                 border=ft.border.all(1, "#232e42"),
                 content=ft.Row(
                     [
-                        ft.Icon(ft.icons.LOCAL_SHIPPING, color="#f59e0b", size=28),
+                        ft.Icon(ft.icons.LOCAL_SHIPPING, color="#10b981", size=28),
                         ft.Column(
                             [
                                 ft.Text('ООО «ЭЛЕКТРОКОННЕКТ» — СДЭК', size=17, weight=ft.FontWeight.BOLD),
@@ -345,8 +473,7 @@ def main(page: ft.Page):
                 [
                     ft.Row([tf_sender_company, tf_sender_fio, tf_sender_phone]),
                     ft.Divider(height=1, color="#232e42"),
-                    ft.Row([dd_rec_type, tf_rec_fio, tf_rec_phone]),
-                    ft.Row([tf_rec_email, tf_pvz]),
+                    ft.Row([dd_rec_type, tf_rec_fio, tf_rec_phone, tf_rec_email]),
                 ],
             ),
             section_card(
@@ -354,11 +481,11 @@ def main(page: ft.Page):
                 [
                     ft.Row([tf_weight, tf_length, tf_width, tf_height, tf_desc]),
                     ft.Row([dd_pickup_from, dd_delivery_to, dd_tariff]),
-                    ft.Row([cb_insurance, tf_declared], alignment=ft.MainAxisAlignment.START),
+                    ft.Row([cb_insurance, tf_declared]),
                 ],
             ),
             section_card(
-                "4. Забор курьером и Комментарий",
+                "4. Информация об отправлении (Забор курьером и ПВЗ / Постамат)",
                 [
                     ft.Row([tf_pickup_address, tf_courier_comment]),
                     ft.Row(
@@ -369,12 +496,29 @@ def main(page: ft.Page):
                             tf_time_from,
                             tf_time_to,
                             ft.OutlinedButton("12:00-15:00", on_click=lambda _: set_interval("12:00", "15:00")),
-                            ft.OutlinedButton("14:00-18:00", on_click=lambda _: set_interval("14:00", "18:00")),
+                            ft.OutlinedButton("13:30-18:00", on_click=lambda _: set_interval("13:30", "18:00")),
                         ],
                         wrap=True,
                     ),
-                    ft.Row([tf_order_comment]),
-                    cb_auto_submit,
+                    ft.Row([cb_attorney, cb_id_doc], wrap=True),
+                    ft.Divider(height=1, color="#232e42"),
+                    ft.Text("Доставить в ПВЗ или постамат", size=13, weight=ft.FontWeight.W_600, color="#cbd5e1"),
+                    ft.Row([tf_pvz_code, tf_pvz_address, btn_load_pvz]),
+                    ft.Row([tf_pvz_search, dd_pvz_type_filter]),
+                    pvz_status_text,
+                    ft.Container(
+                        bgcolor="#0f141e",
+                        border_radius=8,
+                        padding=6,
+                        border=ft.border.all(1, "#232e42"),
+                        content=pvz_list_view,
+                    ),
+                ],
+            ),
+            section_card(
+                "5. Комментарий к заказу и запуск",
+                [
+                    tf_order_comment,
                     ft.Row([btn_run]),
                     ft.Container(
                         bgcolor="#0b0f17",
@@ -404,7 +548,7 @@ def main(page: ft.Page):
                                 [
                                     ft.Text(h.get("recipient", ""), weight=ft.FontWeight.BOLD),
                                     ft.Text(
-                                        f"{h.get('city_to', '')} • {h.get('tariff', '')} • Забор: {h.get('date', '')}",
+                                        f"{h.get('city_to', '')} • ПВЗ: {h.get('pvz', '')} • Забор: {h.get('date', '')}",
                                         size=12,
                                         color="#94a3b8",
                                     ),
@@ -429,7 +573,6 @@ def main(page: ft.Page):
         ],
     )
 
-    # --- ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК ---
     center_container = ft.Container(expand=True, padding=16, content=order_tab)
 
     def show_order(_):
@@ -441,7 +584,6 @@ def main(page: ft.Page):
         center_container.content = history_tab
         page.update()
 
-    # Статус SumatraPDF внизу слева
     sumatra_ok = is_sumatra_ready()
     sumatra_badge = ft.Container(
         bgcolor="#0f2922" if sumatra_ok else "#2d1b1b",
@@ -449,11 +591,7 @@ def main(page: ft.Page):
         padding=10,
         content=ft.Row(
             [
-                ft.Icon(
-                    ft.icons.PRINT,
-                    size=16,
-                    color="#10b981" if sumatra_ok else "#ef4444",
-                ),
+                ft.Icon(ft.icons.PRINT, size=16, color="#10b981" if sumatra_ok else "#ef4444"),
                 ft.Text(
                     "Автопечать SumatraPDF готова" if sumatra_ok else "SumatraPDF.exe не найден",
                     size=11,
@@ -484,7 +622,7 @@ def main(page: ft.Page):
                 ),
                 ft.Divider(color="#232e42"),
                 ft.ListTile(
-                    leading=ft.Icon(ft.icons.EDIT_DOCUMENT, color="#f59e0b"),
+                    leading=ft.Icon(ft.icons.EDIT_DOCUMENT, color="#10b981"),
                     title=ft.Text("Электроконнект", size=13),
                     subtitle=ft.Text("Оформление СДЭК", size=11),
                     on_click=show_order,
