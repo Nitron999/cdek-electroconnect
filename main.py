@@ -1,9 +1,10 @@
 import datetime
+import json
 import queue
 import re
 import threading
 import flet as ft
-from storage import load_recipients, save_recipients, load_history
+from storage import load_recipients, save_recipients, load_history, HISTORY_FILE
 from printer import is_sumatra_ready
 from cdek_pvz import fetch_cdek_pvz
 from cdek_worker import run_cdek_order
@@ -16,6 +17,7 @@ THEMES = {
         "page_bg": "#0b0f19",
         "sidebar_bg": "#111827",
         "card_bg": "#151d2e",
+        "recip_card_bg": "#1f1a14",
         "subcard_bg": "#101725",
         "input_bg": "#0b101b",
         "item_bg": "#161f30",
@@ -31,7 +33,7 @@ THEMES = {
         "accents": {
             "order": "#38bdf8",
             "sender": "#60a5fa",
-            "recip": "#fbbf24",
+            "recip": "#ff9f1c",
             "goods": "#c084fc",
             "ship": "#34d399",
             "comment": "#fb7185",
@@ -43,6 +45,7 @@ THEMES = {
         "page_bg": "#f1f5f9",
         "sidebar_bg": "#ffffff",
         "card_bg": "#ffffff",
+        "recip_card_bg": "#fff7ed",
         "subcard_bg": "#f8fafc",
         "input_bg": "#ffffff",
         "item_bg": "#f8fafc",
@@ -57,8 +60,8 @@ THEMES = {
         "pvz_addr": "#92400e",
         "accents": {
             "order": "#0369a1",
-            "sender": "#1d4ed8",
-            "recip": "#b45309",
+            "sender": "#2563eb",
+            "recip": "#ea580c",
             "goods": "#6d28d9",
             "ship": "#047857",
             "comment": "#be123c",
@@ -70,6 +73,7 @@ THEMES = {
         "page_bg": "#061410",
         "sidebar_bg": "#0a1f19",
         "card_bg": "#0e2921",
+        "recip_card_bg": "#1e1f12",
         "subcard_bg": "#091c16",
         "input_bg": "#061510",
         "item_bg": "#113128",
@@ -84,8 +88,8 @@ THEMES = {
         "pvz_addr": "#fde047",
         "accents": {
             "order": "#34d399",
-            "sender": "#2dd4bf",
-            "recip": "#facc15",
+            "sender": "#38bdf8",
+            "recip": "#ff9f1c",
             "goods": "#a78bfa",
             "ship": "#4ade80",
             "comment": "#fb7185",
@@ -97,6 +101,7 @@ THEMES = {
         "page_bg": "#071120",
         "sidebar_bg": "#0b192e",
         "card_bg": "#0f223d",
+        "recip_card_bg": "#1e1a14",
         "subcard_bg": "#0a172b",
         "input_bg": "#071222",
         "item_bg": "#13294a",
@@ -112,7 +117,7 @@ THEMES = {
         "accents": {
             "order": "#38bdf8",
             "sender": "#60a5fa",
-            "recip": "#fbbf24",
+            "recip": "#ff9f1c",
             "goods": "#c084fc",
             "ship": "#2dd4bf",
             "comment": "#f472b6",
@@ -124,6 +129,7 @@ THEMES = {
         "page_bg": "#121212",
         "sidebar_bg": "#1a1a1a",
         "card_bg": "#202020",
+        "recip_card_bg": "#261c10",
         "subcard_bg": "#181818",
         "input_bg": "#121212",
         "item_bg": "#262626",
@@ -138,9 +144,9 @@ THEMES = {
         "pvz_addr": "#facc15",
         "accents": {
             "order": "#eab308",
-            "sender": "#f59e0b",
-            "recip": "#fbbf24",
-            "goods": "#d97706",
+            "sender": "#38bdf8",
+            "recip": "#ff8c00",
+            "goods": "#c084fc",
             "ship": "#22c55e",
             "comment": "#f87171",
         },
@@ -151,6 +157,7 @@ THEMES = {
         "page_bg": "#050505",
         "sidebar_bg": "#0a0a0a",
         "card_bg": "#101010",
+        "recip_card_bg": "#1c1306",
         "subcard_bg": "#080808",
         "input_bg": "#050505",
         "item_bg": "#141414",
@@ -165,11 +172,11 @@ THEMES = {
         "pvz_addr": "#facc15",
         "accents": {
             "order": "#f5c542",
-            "sender": "#eab308",
-            "recip": "#fbbf24",
+            "sender": "#38bdf8",
+            "recip": "#ff8c00",
             "goods": "#d4af37",
             "ship": "#34d399",
-            "comment": "#f59e0b",
+            "comment": "#f87171",
         },
     },
     "Тёплый песок": {
@@ -178,6 +185,7 @@ THEMES = {
         "page_bg": "#f5f0e6",
         "sidebar_bg": "#fbf8f1",
         "card_bg": "#fffdf9",
+        "recip_card_bg": "#fff3e0",
         "subcard_bg": "#f7f2e7",
         "input_bg": "#ffffff",
         "item_bg": "#f7f2e7",
@@ -193,7 +201,7 @@ THEMES = {
         "accents": {
             "order": "#0369a1",
             "sender": "#1d4ed8",
-            "recip": "#b45309",
+            "recip": "#ea580c",
             "goods": "#6d28d9",
             "ship": "#047857",
             "comment": "#be123c",
@@ -331,7 +339,7 @@ def main(page: ft.Page):
 
     themed_inputs: list[tuple[ft.Control, str]] = []
     themed_checkboxes: list[tuple[ft.Checkbox, str]] = []
-    themed_section_cards: list[tuple[ft.Container, ft.Icon, ft.Text, str]] = []
+    themed_section_cards: list[tuple[ft.Container, ft.Icon, ft.Text, str, bool]] = []
     themed_sub_cards: list[tuple[ft.Container, ft.Icon, ft.Text, str]] = []
     themed_primary_texts: list[ft.Text] = []
     themed_secondary_texts: list[ft.Text] = []
@@ -349,6 +357,46 @@ def main(page: ft.Page):
                 duration=2000,
             )
         )
+
+    def confirm_clear_history(_=None):
+        def close_dlg(_=None):
+            page.close(dlg)
+
+        def do_clear(_=None):
+            try:
+                with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                    json.dump([], f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            page.close(dlg)
+            refresh_tracks()
+            refresh_history()
+            add_log("Треки и история очищены.")
+            page.open(
+                ft.SnackBar(
+                    content=ft.Text("Треки и история очищены", color="#ffffff", weight=ft.FontWeight.BOLD),
+                    bgcolor="#dc2626",
+                    duration=2000,
+                )
+            )
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Очистить треки и историю?", weight=ft.FontWeight.BOLD),
+            content=ft.Text("Все записи во вкладках «Треки» и «История» будут удалены. Продолжить?"),
+            actions=[
+                ft.TextButton("Отмена", on_click=close_dlg),
+                ft.ElevatedButton(
+                    "Очистить",
+                    icon=ft.icons.DELETE_FOREVER,
+                    bgcolor="#dc2626",
+                    color="#ffffff",
+                    on_click=do_clear,
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.open(dlg)
 
     def styled_tf(
         label: str,
@@ -378,7 +426,7 @@ def main(page: ft.Page):
             multiline=multiline,
             min_lines=min_lines,
             max_lines=max_lines,
-            dense=True,
+            content_padding=ft.padding.symmetric(horizontal=12, vertical=13),
             expand=expand,
             width=width,
             filled=True,
@@ -386,8 +434,8 @@ def main(page: ft.Page):
             border_color=t["input_border"],
             focused_border_color=accent,
             border_radius=8,
-            label_style=ft.TextStyle(color=accent, weight=_w_label(t), size=12),
-            text_style=ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=14),
+            label_style=ft.TextStyle(color=accent, weight=_w_label(t), size=13),
+            text_style=ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=15),
             hint_style=ft.TextStyle(color=t["text_secondary"], weight=_w_sub(t), size=13),
         )
         themed_inputs.append((ctrl, accent_key))
@@ -407,7 +455,7 @@ def main(page: ft.Page):
             label=label,
             value=value,
             options=[ft.dropdown.Option(x) for x in options],
-            dense=True,
+            content_padding=ft.padding.symmetric(horizontal=12, vertical=12),
             expand=expand,
             width=width,
             filled=True,
@@ -415,8 +463,8 @@ def main(page: ft.Page):
             border_color=t["input_border"],
             focused_border_color=accent,
             border_radius=8,
-            label_style=ft.TextStyle(color=accent, weight=_w_label(t), size=12),
-            text_style=ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=14),
+            label_style=ft.TextStyle(color=accent, weight=_w_label(t), size=13),
+            text_style=ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=15),
         )
         themed_inputs.append((ctrl, accent_key))
         return ctrl
@@ -460,11 +508,12 @@ def main(page: ft.Page):
     tf_city_from = styled_tf("Город отправителя", "Москва, Москва, Россия", accent_key="order", expand=1)
     tf_city_to = styled_tf("Город получателя", "", accent_key="order", expand=1)
 
-    # --- 2. ОТПРАВИТЕЛЬ И ПОЛУЧАТЕЛЬ ---
+    # --- 2. ОТПРАВИТЕЛЬ ---
     tf_sender_company = styled_tf("Компания (ИНН 5408154542)", '"ЭЛЕКТРОКОННЕКТ"', accent_key="sender", expand=1)
     tf_sender_fio = styled_tf("ФИО отправителя", "Крылова Людмила Борисовна", accent_key="sender", expand=1)
     tf_sender_phone = styled_tf("Телефон отправителя", "+7 916 195 36 94", accent_key="sender", expand=1)
 
+    # --- 3. ПОЛУЧАТЕЛЬ ---
     dd_rec_type = styled_dd("Тип получателя", "ФИЗ. ЛИЦО", ["ФИЗ. ЛИЦО", "ЮР. ЛИЦО"], accent_key="recip", expand=1)
     tf_rec_company = styled_tf(
         "Фирма / Компания",
@@ -483,7 +532,7 @@ def main(page: ft.Page):
     tf_rec_phone = styled_tf("Телефон получателя", "", accent_key="recip", expand=1)
     tf_rec_email = styled_tf("Электронная почта", "", accent_key="recip", expand=1)
 
-    # --- 3. ТОВАРЫ, ТАРИФ И ДОП. УСЛУГИ ---
+    # --- 4. ТОВАРЫ, ТАРИФ И ДОП. УСЛУГИ ---
     tf_weight = styled_tf("Вес, кг", "0.5", accent_key="goods", expand=1)
     tf_length = styled_tf("Длина, см", "10", accent_key="goods", expand=1)
     tf_width = styled_tf("Ширина, см", "5", accent_key="goods", expand=1)
@@ -506,19 +555,19 @@ def main(page: ft.Page):
     )
     dd_tariff = styled_dd("Тариф", "Экспресс дверь-склад", TARIFF_OPTIONS, accent_key="goods", expand=2)
     cb_insurance = styled_cb("Дополнительный сбор за объявленную стоимость", True, "goods")
-    tf_declared = styled_tf("Объявленная стоимость, ₽", "3000", accent_key="goods", width=210)
+    tf_declared = styled_tf("Объявленная стоимость, ₽", "3000", accent_key="goods", width=215)
 
-    # --- 4. ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ ---
+    # --- 5. ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ ---
     tf_pickup_address = styled_tf("Адрес забора курьером", "Сущёвская, 21, офис 426", accent_key="ship", expand=2)
     tf_courier_comment = styled_tf("Комментарий для курьера", "", accent_key="ship", expand=1)
-    tf_pickup_date = styled_tf("Дата забора", today.strftime("%d.%m.%Y"), accent_key="ship", width=155)
-    tf_time_from = styled_tf("Забор с", "12:00", accent_key="ship", width=105)
-    tf_time_to = styled_tf("Забор до", "15:00", accent_key="ship", width=105)
+    tf_pickup_date = styled_tf("Дата забора", today.strftime("%d.%m.%Y"), accent_key="ship", width=160)
+    tf_time_from = styled_tf("Забор с", "12:00", accent_key="ship", width=110)
+    tf_time_to = styled_tf("Забор до", "15:00", accent_key="ship", width=110)
 
     cb_attorney = styled_cb("Курьеру необходима доверенность", False, "ship")
     cb_id_doc = styled_cb("Курьеру необходим документ удостоверяющий личность", False, "ship")
 
-    tf_pvz_code = styled_tf("Код ПВЗ", "", accent_key="ship", width=130)
+    tf_pvz_code = styled_tf("Код ПВЗ", "", accent_key="ship", width=135)
     tf_pvz_address = styled_tf("Адрес ПВЗ (или адрес доставки)", "", accent_key="ship", expand=True)
 
     def clear_pvz_filter(_=None):
@@ -539,7 +588,7 @@ def main(page: ft.Page):
         accent_key="ship",
         expand=True,
     )
-    dd_pvz_type_filter = styled_dd("Тип пункта", "Пункт выдачи", ["Все", "Пункт выдачи", "Постамат"], accent_key="ship", width=165)
+    dd_pvz_type_filter = styled_dd("Тип пункта", "Пункт выдачи", ["Все", "Пункт выдачи", "Постамат"], accent_key="ship", width=170)
     pvz_status_text = ft.Text(
         "При выборе клиента из базы ПВЗ города подгружаются автоматически.",
         size=12,
@@ -547,9 +596,9 @@ def main(page: ft.Page):
         weight=_w_sub(th()),
     )
     themed_secondary_texts.append(pvz_status_text)
-    pvz_list_view = ft.ListView(height=270, spacing=6)
+    pvz_list_view = ft.ListView(height=175, spacing=4)
 
-    # --- 5. КОММЕНТАРИЙ К ЗАКАЗУ ---
+    # --- 6. КОММЕНТАРИЙ К ЗАКАЗУ ---
     tf_order_comment = styled_tf(
         "Комментарий к заказу",
         "УПД",
@@ -652,12 +701,12 @@ def main(page: ft.Page):
                 ft.Container(
                     bgcolor=t["item_selected_bg"] if is_selected else t["item_bg"],
                     border=ft.border.all(2 if is_selected else 1, badge_color if is_selected else t["border"]),
-                    border_radius=9,
-                    padding=ft.padding.symmetric(horizontal=12, vertical=9),
+                    border_radius=8,
+                    padding=ft.padding.symmetric(horizontal=10, vertical=6),
                     on_click=lambda e, it=item: select_pvz(it),
                     content=ft.Row(
                         [
-                            ft.Container(width=10, height=10, border_radius=5, bgcolor=badge_color),
+                            ft.Container(width=8, height=8, border_radius=4, bgcolor=badge_color),
                             ft.Column(
                                 [
                                     ft.Row(
@@ -665,18 +714,18 @@ def main(page: ft.Page):
                                             ft.Container(
                                                 bgcolor=t["input_bg"],
                                                 border=ft.border.all(1, badge_color),
-                                                border_radius=5,
-                                                padding=ft.padding.symmetric(horizontal=7, vertical=2),
+                                                border_radius=4,
+                                                padding=ft.padding.symmetric(horizontal=6, vertical=1),
                                                 content=ft.Text(
                                                     item.get("code", "") or "ПВЗ",
-                                                    size=12,
+                                                    size=11,
                                                     weight=ft.FontWeight.BOLD,
                                                     color=badge_color,
                                                 ),
                                             ),
                                             ft.Text(
                                                 item.get("type", ""),
-                                                size=12,
+                                                size=11,
                                                 weight=_w_label(t),
                                                 color=badge_color,
                                             ),
@@ -693,26 +742,26 @@ def main(page: ft.Page):
                                                 color=t["text_secondary"],
                                             ),
                                         ],
-                                        spacing=8,
+                                        spacing=6,
                                         wrap=True,
                                     ),
                                     ft.Text(
                                         item.get("address", ""),
-                                        size=15,
+                                        size=13,
                                         weight=ft.FontWeight.BOLD,
                                         color=t["pvz_addr"],
                                     ),
                                 ],
-                                spacing=4,
+                                spacing=2,
                                 expand=True,
                             ),
                             ft.Icon(
                                 ft.icons.CHECK_CIRCLE if is_selected else ft.icons.CHECK_CIRCLE_OUTLINE,
-                                size=20,
+                                size=18,
                                 color=badge_color,
                             ),
                         ],
-                        spacing=10,
+                        spacing=8,
                     ),
                 )
             )
@@ -720,10 +769,10 @@ def main(page: ft.Page):
         if loaded_pvz and matched_count == 0:
             pvz_list_view.controls.append(
                 ft.Container(
-                    padding=12,
+                    padding=10,
                     content=ft.Text(
                         "По фильтру ничего не найдено — нажми × в строке фильтра, чтобы показать все пункты города.",
-                        size=13,
+                        size=12,
                         weight=_w_sub(t),
                         color=t["accents"]["recip"],
                     ),
@@ -797,7 +846,7 @@ def main(page: ft.Page):
         prefix_icon=ft.icons.SEARCH,
         accent_key="recip",
     )
-    recipients_list = ft.ListView(expand=True, spacing=6)
+    recipients_list = ft.ListView(expand=True, spacing=7)
 
     def apply_recipient(item: dict):
         nonlocal loaded_pvz
@@ -991,42 +1040,42 @@ def main(page: ft.Page):
                 ft.Container(
                     bgcolor=t["item_bg"],
                     border=ft.border.all(1, t["border"]),
-                    border_radius=8,
-                    padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                    border_radius=9,
+                    padding=ft.padding.symmetric(horizontal=12, vertical=10),
                     content=ft.Row(
                         [
                             ft.Icon(
                                 ft.icons.BUSINESS if is_org else ft.icons.PERSON,
-                                size=18,
+                                size=19,
                                 color=t["accents"]["recip"],
                             ),
                             ft.Column(
                                 [
                                     ft.Text(
                                         title_text,
-                                        size=13,
+                                        size=14,
                                         weight=_w_label(t),
                                         color=t["text_primary"],
                                     ),
                                     ft.Text(
                                         sub_text,
-                                        size=11,
+                                        size=12,
                                         weight=_w_sub(t),
                                         color=t["text_secondary"],
                                     ),
                                 ],
-                                spacing=1,
+                                spacing=2,
                                 expand=True,
                             ),
                             ft.IconButton(
                                 icon=ft.icons.EDIT,
-                                icon_size=17,
+                                icon_size=18,
                                 icon_color=t["accents"]["order"],
                                 tooltip="Редактировать / удалить получателя",
                                 on_click=lambda e, it=item: open_edit_recipient_dialog(it),
                             ),
                         ],
-                        spacing=4,
+                        spacing=6,
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
                     on_click=lambda e, it=item: apply_recipient(it),
@@ -1227,24 +1276,35 @@ def main(page: ft.Page):
     btn_run.on_click = on_run_click
 
     # --- КАРТОЧКИ СЕКЦИЙ ---
-    def section_card(title: str, icon, accent_key: str, controls: list):
+    def section_card(title: str, icon, accent_key: str, controls: list, highlight: bool = False):
         t = th()
         accent = t["accents"][accent_key]
-        ic = ft.Icon(icon, color=accent, size=20)
-        tx = ft.Text(title, size=15, weight=ft.FontWeight.BOLD, color=accent)
-        box = ft.Container(
-            bgcolor=t["card_bg"],
-            border_radius=12,
-            border=ft.border.only(
+        ic = ft.Icon(icon, color=accent, size=22 if highlight else 20)
+        tx = ft.Text(title, size=16 if highlight else 15, weight=ft.FontWeight.BOLD, color=accent)
+        if highlight:
+            card_bg = t.get("recip_card_bg", t["card_bg"])
+            card_border = ft.border.only(
+                left=ft.BorderSide(6, accent),
+                top=ft.BorderSide(1.5, accent),
+                right=ft.BorderSide(1.5, accent),
+                bottom=ft.BorderSide(1.5, accent),
+            )
+        else:
+            card_bg = t["card_bg"]
+            card_border = ft.border.only(
                 left=ft.BorderSide(4, accent),
                 top=ft.BorderSide(1, t["border"]),
                 right=ft.BorderSide(1, t["border"]),
                 bottom=ft.BorderSide(1, t["border"]),
-            ),
-            padding=14,
-            content=ft.Column([ft.Row([ic, tx], spacing=8), *controls], spacing=10),
+            )
+        box = ft.Container(
+            bgcolor=card_bg,
+            border_radius=12,
+            border=card_border,
+            padding=16,
+            content=ft.Column([ft.Row([ic, tx], spacing=8), *controls], spacing=12),
         )
-        themed_section_cards.append((box, ic, tx, accent_key))
+        themed_section_cards.append((box, ic, tx, accent_key, highlight))
         return box
 
     def sub_card(title: str, icon, accent_key: str, controls: list):
@@ -1313,7 +1373,7 @@ def main(page: ft.Page):
     pvz_box_container = ft.Container(
         bgcolor=th()["input_bg"],
         border_radius=8,
-        padding=8,
+        padding=6,
         border=ft.border.all(1, th()["border"]),
         content=pvz_list_view,
     )
@@ -1322,7 +1382,7 @@ def main(page: ft.Page):
     scrollable_form = ft.Column(
         scroll=ft.ScrollMode.AUTO,
         expand=True,
-        spacing=14,
+        spacing=15,
         controls=[
             top_header_card,
             section_card(
@@ -1336,24 +1396,25 @@ def main(page: ft.Page):
                 ],
             ),
             section_card(
-                "2. ОТПРАВИТЕЛЬ И ПОЛУЧАТЕЛЬ",
-                ft.icons.PEOPLE,
-                "recip",
+                "2. ОТПРАВИТЕЛЬ",
+                ft.icons.OUTBOX,
+                "sender",
                 [
-                    sub_card("ОТПРАВИТЕЛЬ", ft.icons.OUTBOX, "sender", [ft.Row([tf_sender_company, tf_sender_fio, tf_sender_phone])]),
-                    sub_card(
-                        "ПОЛУЧАТЕЛЬ",
-                        ft.icons.MOVE_TO_INBOX,
-                        "recip",
-                        [
-                            ft.Row([dd_rec_type, tf_rec_company, tf_rec_fio]),
-                            ft.Row([tf_rec_phone, tf_rec_email]),
-                        ],
-                    ),
+                    ft.Row([tf_sender_company, tf_sender_fio, tf_sender_phone]),
                 ],
             ),
             section_card(
-                "3. ТОВАРЫ, ТАРИФ И ДОП. УСЛУГИ",
+                "3. ПОЛУЧАТЕЛЬ",
+                ft.icons.MOVE_TO_INBOX,
+                "recip",
+                [
+                    ft.Row([dd_rec_type, tf_rec_company, tf_rec_fio]),
+                    ft.Row([tf_rec_phone, tf_rec_email]),
+                ],
+                highlight=True,
+            ),
+            section_card(
+                "4. ТОВАРЫ, ТАРИФ И ДОП. УСЛУГИ",
                 ft.icons.INVENTORY_2,
                 "goods",
                 [
@@ -1363,7 +1424,7 @@ def main(page: ft.Page):
                 ],
             ),
             section_card(
-                "4. ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ (ЗАБОР И ПВЗ)",
+                "5. ИНФОРМАЦИЯ ОБ ОТПРАВЛЕНИИ (ЗАБОР И ПВЗ)",
                 ft.icons.LOCATION_ON,
                 "ship",
                 [
@@ -1390,7 +1451,7 @@ def main(page: ft.Page):
                 ],
             ),
             section_card(
-                "5. КОММЕНТАРИЙ К ЗАКАЗУ",
+                "6. КОММЕНТАРИЙ К ЗАКАЗУ",
                 ft.icons.COMMENT,
                 "comment",
                 [tf_order_comment, cb_auto_save],
@@ -1444,6 +1505,17 @@ def main(page: ft.Page):
         on_click=copy_all_tracks,
     )
 
+    btn_clear_tracks = ft.OutlinedButton(
+        "Очистить",
+        icon=ft.icons.DELETE_OUTLINE,
+        style=ft.ButtonStyle(
+            color="#ef4444",
+            side=ft.BorderSide(1, "#ef4444"),
+            shape=ft.RoundedRectangleBorder(radius=20),
+        ),
+        on_click=confirm_clear_history,
+    )
+
     def refresh_tracks(_=None):
         t = th()
         hist = load_history()
@@ -1479,7 +1551,7 @@ def main(page: ft.Page):
                         [
                             ft.Text(
                                 line,
-                                size=14,
+                                size=15,
                                 weight=ft.FontWeight.BOLD,
                                 color=t["text_primary"],
                                 selectable=True,
@@ -1487,7 +1559,7 @@ def main(page: ft.Page):
                             ),
                             ft.IconButton(
                                 icon=ft.icons.CONTENT_COPY,
-                                icon_size=16,
+                                icon_size=17,
                                 icon_color=t["text_secondary"],
                                 tooltip="Копировать строку",
                                 on_click=lambda e, ln=line: copy_to_clipboard(ln, f"Скопировано: {ln}"),
@@ -1503,7 +1575,7 @@ def main(page: ft.Page):
                 bgcolor=t["card_bg"],
                 border=ft.border.all(1, t["border"]),
                 border_radius=12,
-                padding=ft.padding.symmetric(horizontal=16, vertical=12),
+                padding=ft.padding.symmetric(horizontal=16, vertical=14),
                 content=ft.Column(
                     [
                         ft.Row(
@@ -1511,7 +1583,7 @@ def main(page: ft.Page):
                                 ft.Icon(ft.icons.CALENDAR_TODAY, size=15, color="#10b981"),
                                 ft.Text(
                                     _format_day_title(day_k, len(day_lines)),
-                                    size=14,
+                                    size=15,
                                     weight=ft.FontWeight.BOLD,
                                     color=t["text_primary"],
                                     expand=True,
@@ -1535,7 +1607,7 @@ def main(page: ft.Page):
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         ft.Divider(height=1, color=t["border"]),
-                        ft.Column(rows_ui, spacing=2),
+                        ft.Column(rows_ui, spacing=4),
                     ],
                     spacing=10,
                 ),
@@ -1551,7 +1623,7 @@ def main(page: ft.Page):
                     padding=20,
                     content=ft.Text(
                         "Пока нет оформленных отправлений. После создания заказа трек-номер появится здесь автоматически.",
-                        size=13,
+                        size=14,
                         weight=_w_sub(t),
                         color=t["text_secondary"],
                     ),
@@ -1571,6 +1643,7 @@ def main(page: ft.Page):
                     ft.Icon(ft.icons.RECEIPT_LONG, color="#10b981", size=24),
                     tracks_title,
                     ft.Container(expand=True),
+                    btn_clear_tracks,
                     btn_copy_all_tracks,
                     ft.IconButton(
                         icon=ft.icons.REFRESH,
@@ -1588,33 +1661,60 @@ def main(page: ft.Page):
     )
 
     # --- ВКЛАДКА 3: ИСТОРИЯ ---
-    history_list = ft.ListView(expand=True, spacing=8)
+    history_list = ft.ListView(expand=True, spacing=10)
     history_title = ft.Text("История оформленных накладных", size=18, weight=ft.FontWeight.BOLD, color=th()["text_primary"])
     themed_primary_texts.append(history_title)
+
+    btn_clear_history = ft.OutlinedButton(
+        "Очистить историю",
+        icon=ft.icons.DELETE_OUTLINE,
+        style=ft.ButtonStyle(
+            color="#ef4444",
+            side=ft.BorderSide(1, "#ef4444"),
+            shape=ft.RoundedRectangleBorder(radius=20),
+        ),
+        on_click=confirm_clear_history,
+    )
 
     def refresh_history():
         t = th()
         history_list.controls.clear()
-        for h in load_history():
+        items = load_history()
+        if not items:
+            history_list.controls.append(
+                ft.Container(
+                    padding=20,
+                    content=ft.Text(
+                        "История пуста.",
+                        size=14,
+                        weight=_w_sub(t),
+                        color=t["text_secondary"],
+                    ),
+                )
+            )
+            return
+
+        for h in items:
             track_part = f"Трек: {h['track']} • " if h.get("track") else ""
             history_list.controls.append(
                 ft.Container(
                     bgcolor=t["card_bg"],
                     border=ft.border.all(1, t["border"]),
                     border_radius=10,
-                    padding=12,
+                    padding=14,
                     content=ft.Row(
                         [
                             ft.Column(
                                 [
-                                    ft.Text(h.get("recipient", ""), weight=ft.FontWeight.BOLD, color=t["text_primary"]),
+                                    ft.Text(h.get("recipient", ""), size=15, weight=ft.FontWeight.BOLD, color=t["text_primary"]),
                                     ft.Text(
                                         f"{track_part}{h.get('city_to', '')} • ПВЗ: {h.get('pvz', '')} • Забор: {h.get('date', '')}",
-                                        size=12,
+                                        size=13,
                                         weight=_w_sub(t),
                                         color=t["text_secondary"],
                                     ),
                                 ],
+                                spacing=3,
                                 expand=True,
                             ),
                             ft.Text(h.get("created_at", ""), size=12, weight=_w_sub(t), color=t["text_secondary"]),
@@ -1627,7 +1727,27 @@ def main(page: ft.Page):
                 )
             )
 
-    history_tab = ft.Column(expand=True, controls=[history_title, history_list])
+    history_divider = ft.Divider(height=1, color=th()["border"])
+    themed_dividers.append(history_divider)
+
+    history_tab = ft.Column(
+        expand=True,
+        spacing=12,
+        controls=[
+            ft.Row(
+                [
+                    ft.Icon(ft.icons.HISTORY, color="#10b981", size=24),
+                    history_title,
+                    ft.Container(expand=True),
+                    btn_clear_history,
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            history_divider,
+            history_list,
+        ],
+    )
     center_container = ft.Container(expand=True, padding=14, content=order_tab)
 
     def show_order(_):
@@ -1672,8 +1792,8 @@ def main(page: ft.Page):
             ctrl.fill_color = t["input_bg"]
             ctrl.border_color = t["input_border"]
             ctrl.focused_border_color = acc
-            ctrl.label_style = ft.TextStyle(color=acc, weight=_w_label(t), size=12)
-            ctrl.text_style = ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=14)
+            ctrl.label_style = ft.TextStyle(color=acc, weight=_w_label(t), size=13)
+            ctrl.text_style = ft.TextStyle(color=t["text_primary"], weight=_w_input(t), size=15)
             if hasattr(ctrl, "hint_style"):
                 ctrl.hint_style = ft.TextStyle(color=t["text_secondary"], weight=_w_sub(t), size=13)
 
@@ -1685,15 +1805,24 @@ def main(page: ft.Page):
                 size=cb.label_style.size if cb.label_style else 13,
             )
 
-        for box, ic, tx, akey in themed_section_cards:
+        for box, ic, tx, akey, is_hl in themed_section_cards:
             acc = t["accents"][akey]
-            box.bgcolor = t["card_bg"]
-            box.border = ft.border.only(
-                left=ft.BorderSide(4, acc),
-                top=ft.BorderSide(1, t["border"]),
-                right=ft.BorderSide(1, t["border"]),
-                bottom=ft.BorderSide(1, t["border"]),
-            )
+            if is_hl:
+                box.bgcolor = t.get("recip_card_bg", t["card_bg"])
+                box.border = ft.border.only(
+                    left=ft.BorderSide(6, acc),
+                    top=ft.BorderSide(1.5, acc),
+                    right=ft.BorderSide(1.5, acc),
+                    bottom=ft.BorderSide(1.5, acc),
+                )
+            else:
+                box.bgcolor = t["card_bg"]
+                box.border = ft.border.only(
+                    left=ft.BorderSide(4, acc),
+                    top=ft.BorderSide(1, t["border"]),
+                    right=ft.BorderSide(1, t["border"]),
+                    bottom=ft.BorderSide(1, t["border"]),
+                )
             ic.color = acc
             tx.color = acc
 
@@ -1761,9 +1890,9 @@ def main(page: ft.Page):
     themed_dividers.append(left_divider)
 
     left_sidebar = ft.Container(
-        width=235,
+        width=215,
         bgcolor=th()["sidebar_bg"],
-        padding=14,
+        padding=12,
         border=ft.border.only(right=ft.BorderSide(1, th()["border"])),
         content=ft.Column(
             [
@@ -1801,7 +1930,7 @@ def main(page: ft.Page):
     )
 
     right_sidebar = ft.Container(
-        width=325,
+        width=340,
         bgcolor=th()["sidebar_bg"],
         padding=14,
         border=ft.border.only(left=ft.BorderSide(1, th()["border"])),
